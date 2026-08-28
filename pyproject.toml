@@ -42,6 +42,12 @@ dependencies = [
   # joystickd
   "inputs",
 
+  # beamngd + beamcamd
+  "evdev",  # keyboard cruise-control buttons (beamngd)
+  "mss",    # BeamNG window capture (beamcamd)
+  "opencv-python-headless",  # fast RGB->NV12 conversion (beamcamd); headless -- no GUI needed in a daemon
+  "python-uinput",  # optional virtual-wheel control path (beamngd, BEAMPILOT_CONTROL_MODE=joystick)
+
   # these should be removed
   "pyzmq",
   "sentry-sdk",

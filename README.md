@@ -1,5 +1,6 @@
 # beampilot
-**beampilot is a fork of openpilot with a bridge to connect BeamNG.tech.**
+**beampilot is a fork of openpilot with a bridge to connect BeamNG.drive** (via a custom mod;
+no BeamNG.tech / beamngpy required).
 
 ![Hackatime Badge](https://hackatime-badge.hackclub.com/U0ALZ4JLUL9/beampilot)
 
@@ -90,8 +91,45 @@ Processes that are incompatible with desktop use or has no use for in desktop si
 
 ### Added
 Proccesses that are required because of the removed processes have been added.
-* `beamngd` Updates Telemetry (100Hz) (currently inop)
-* `beamcamd` Updates Cameras (20Hz) (currently inop)
+* `beamngd` Updates Telemetry (100Hz), talks to the `beampilot_bridge` BeamNG mod (see below)
+* `beamcamd` Updates Cameras (20Hz), captures the BeamNG window off the desktop
+
+## BeamNG.drive mod (`beampilot_bridge`)
+`setup_beampilot.sh` symlinks `tools/beamng_mod/beampilot_bridge` into
+`~/.local/share/BeamNG/BeamNG.drive/current/mods/unpacked/beampilot_bridge` automatically (run
+BeamNG.drive at least once first, then (re-)run `setup_beampilot.sh` to pick up the userfolder).
+Edits under `tools/beamng_mod/` apply live; reload with `Ctrl+L` in-game.
+
+The mod adds one custom UDP protocol (`beampilot`, alongside BeamNG's stock `outgauge`/`motionSim`)
+that sends vehicle telemetry to `beamngd` on `127.0.0.1:49152` and receives openpilot's
+steering/throttle/brake back on `127.0.0.1:49153`, applying them via BeamNG's own `input.event()`
+(same mechanism BeamNG's built-in AI driver uses) whenever openpilot is engaged. It also
+auto-selects the `openpilot_cam` camera mode on vehicle spawn.
+
+Cruise control buttons (physical keyboard, not in-game bindings): `i` decel/set, `o` res/accel,
+`u` cancel. (Not c/v/b -- those collide with BeamNG.drive's own default bindings, e.g. `c` cycles
+cameras.)
+
+`beamcamd` captures a fixed monitor/region (BeamNG.drive is expected to run fullscreen/borderless);
+override with the `BEAMPILOT_CAM_MONITOR` (index into mss's monitor list, default `1`) or
+`BEAMPILOT_CAM_REGION` (`left,top,width,height`, for a windowed instance) env vars if needed.
+
+### Control mode: Lua injection vs. virtual wheel
+`beamngd` has two ways to apply openpilot's steering/throttle/brake to BeamNG, selected with the
+`BEAMPILOT_CONTROL_MODE` env var:
+
+* `lua` (default) -- sends control values to the mod's UDP socket, applied via `input.event()`
+  straight into the vehicle's Lua physics loop. No in-game setup needed.
+* `joystick` -- `BEAMPILOT_CONTROL_MODE=joystick ./launch_beampilot.sh` (or export it before
+  launching) creates a virtual USB wheel device (`openpilot/selfdrive/beamngd/virtual_joystick.py`,
+  named "BeamPilot Virtual Wheel") via `uinput`, and `beamngd` drives its steering/throttle/brake
+  axes directly instead of talking to the mod's control socket. BeamNG.drive reads it exactly like
+  a real wheel: **one-time setup**, with `beamngd` already running, go to Options > Controls in
+  BeamNG, find "BeamPilot Virtual Wheel" in the device list, and bind its axes to Steering,
+  Accelerate, and Brake (same procedure as configuring a real racing wheel). This is the same
+  approach [jackz314/openpilot's ETS2/ATS bridge](https://github.com/jackz314/openpilot/tree/master/tools/truck_sim)
+  uses (there it's the only option -- ETS2/ATS has no scriptable input hook at all, unlike
+  BeamNG's Lua). Requires membership in the `input` group for `/dev/uinput` access.
 
 ## Test Scripts
 venv `source .venv/bin/activate`<br>

@@ -1,0 +1,5 @@
+{
+  "name": "beampilot bridge",
+  "authors": "openpilot-beamng bridge",
+  "description": "Custom telemetry/control UDP protocol for the openpilot <-> BeamNG.drive bridge, plus automatic openpilot camera selection."
+}

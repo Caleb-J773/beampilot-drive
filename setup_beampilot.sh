@@ -15,4 +15,14 @@ else
   exit 1
 fi
 
+BEAMNG_USERDIR="$HOME/.local/share/BeamNG/BeamNG.drive/current"
+if [ -d "$BEAMNG_USERDIR" ]; then
+  MODS_DIR="$BEAMNG_USERDIR/mods/unpacked"
+  mkdir -p "$MODS_DIR"
+  ln -sfn "$DIR/tools/beamng_mod/beampilot_bridge" "$MODS_DIR/beampilot_bridge"
+  echo "beampilot_bridge mod symlinked into $MODS_DIR (edits in the repo apply live; reload with Ctrl+L in-game)"
+else
+  echo "BeamNG.drive user folder not found at $BEAMNG_USERDIR (run BeamNG.drive at least once, then re-run this script to install the beampilot_bridge mod)"
+fi
+
 echo "beampilot setup complete"

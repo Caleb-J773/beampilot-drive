@@ -56,7 +56,7 @@ class SimulatedCar:
     msg.append(self.packer.make_can_msg("STEER_MOTOR_TORQUE", 0, {}))
     msg.append(self.packer.make_can_msg("EPB_STATUS", 0, {}))
     msg.append(self.packer.make_can_msg("DOORS_STATUS", 0, {}))
-    msg.append(self.packer.make_can_msg("CRUISE", 0, {}))
+    msg.append(self.packer.make_can_msg("CRUISE", 0, {"CRUISE_SPEED_PCM": simulator_state.cruise_speed * 3.6}))
     msg.append(self.packer.make_can_msg("CRUISE_FAULT_STATUS", 0, {}))
     msg.append(self.packer.make_can_msg("SCM_FEEDBACK", 0,
                                     {
@@ -74,7 +74,14 @@ class SimulatedCar:
 
     # *** cam bus ***
     msg.append(self.packer.make_can_msg("STEERING_CONTROL", 2, {}))
-    msg.append(self.packer.make_can_msg("ACC_HUD", 2, {}))
+    # For BOSCH_RADARLESS Hondas (this car), carstate.py's cruiseState.speed
+    # comes from THIS message's CRUISE_SPEED field, not CRUISE_SPEED_PCM above
+    # (that one's only read for non-Bosch Hondas) -- see
+    # carstate.py: `if self.CP.flags & HondaFlags.BOSCH: ... acc_hud =
+    # cp_cam.vl["ACC_HUD"] if BOSCH_RADARLESS else cp.vl["ACC_HUD"]`. Values
+    # above 160 are treated as a transient PCM "pulse" and ignored (real
+    # speeds are always well under that), so no special-casing needed here.
+    msg.append(self.packer.make_can_msg("ACC_HUD", 2, {"CRUISE_SPEED": simulator_state.cruise_speed * 3.6}))
     msg.append(self.packer.make_can_msg("LKAS_HUD", 2, {}))
 
     self.pm.send('can', can_list_to_can_capnp(msg))
@@ -86,15 +93,32 @@ class SimulatedCar:
       self.obd_multiplexing = not self.obd_multiplexing
       self.params.put_bool("ObdMultiplexingChanged", True, block=True)
 
+    # Mirror back whatever the car interface actually computed (selfdrived
+    # compares pandaStates[i].safetyModel/safetyParam against
+    # CP.safetyConfigs[i] and disables with "Controls Mismatch" on any
+    # difference). Hardcoding RADARLESS|BOSCH_LONG here only matches cars
+    # where openpilotLongitudinalControl is on; e.g. HONDA_CIVIC_2022 without
+    # alpha_long has openpilotLongitudinalControl=False, so BOSCH_LONG is
+    # never actually set and the hardcoded value silently mismatched forever.
+    safety_configs = self.sm["carParams"].safetyConfigs
+    if safety_configs:
+      safety_model = safety_configs[0].safetyModel
+      safety_param = safety_configs[0].safetyParam
+    else:
+      # carParams not published yet (first tick or two) -- fall back to a
+      # reasonable default; this self-corrects within a couple of ticks.
+      safety_model = 'hondaBosch'
+      safety_param = HondaSafetyFlags.RADARLESS.value
+
     dat = messaging.new_message('pandaStates', 1)
     dat.valid = True
     dat.pandaStates[0] = {
       'ignitionLine': simulator_state.ignition,
       'pandaType': "blackPanda",
       'controlsAllowed': True,
-      'safetyModel': 'hondaBosch',
+      'safetyModel': safety_model,
       'alternativeExperience': self.sm["carParams"].alternativeExperience,
-      'safetyParam': HondaSafetyFlags.RADARLESS.value | HondaSafetyFlags.BOSCH_LONG.value,
+      'safetyParam': safety_param,
     }
     self.pm.send('pandaStates', dat)
 
@@ -102,7 +126,10 @@ class SimulatedCar:
     try:
       self.send_can_messages(simulator_state)
 
-      if self.idx % 50 == 0: # only send panda states at 2hz
+      # 10Hz, matching SERVICE_LIST['pandaStates'].frequency -- this used to be
+      # every 50 ticks (2Hz), 5x slower than expected, which measured as a
+      # persistent pandaStates rate shortfall.
+      if self.idx % 10 == 0:
         self.send_panda_state(simulator_state)
 
       self.idx += 1

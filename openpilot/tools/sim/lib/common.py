@@ -52,6 +52,11 @@ class SimulatorState:
     self.user_torque: float = 0
 
     self.cruise_button = 0
+    # Mirrors what a real Honda PCM tracks internally and reports back over CAN
+    # (CRUISE_SPEED_PCM) -- pcmCruise=True cars have openpilot trust this value
+    # directly as cruiseState.speed rather than computing their own setpoint, so
+    # a bridge that never sets this leaves the target speed at 0 forever.
+    self.cruise_speed: float = 0.0
 
     self.left_blinker = False
     self.right_blinker = False

@@ -14,14 +14,25 @@ if TYPE_CHECKING:
 class SimulatedSensors:
   """Simulates the C3 sensors (acc, gyro, gps, peripherals, dm state, cameras) to OpenPilot"""
 
-  def __init__(self, dual_camera=False):
+  def __init__(self, dual_camera=False, create_camera=True):
     self.pm = messaging.PubMaster(['accelerometer', 'gyroscope', 'gpsLocationExternal', 'driverStateV2', 'driverMonitoringState', 'peripheralState'])
-    self.camerad = Camerad(dual_camera=dual_camera)
+    # create_camera=False lets a bridge that owns its own camera pipeline (a
+    # separate process publishing wideRoadCameraState/narrowRoadCameraState,
+    # e.g. beampilot's beamcamd) use this class without a second, conflicting
+    # VisionIpcServer("camerad")/PubMaster for those same channels.
+    self.camerad = Camerad(dual_camera=dual_camera) if create_camera else None
     self.last_perp_update = 0
     self.last_dmon_update = 0
 
-  def send_imu_message(self, simulator_state: 'SimulatorState'):
-    for _ in range(5):
+  def send_imu_message(self, simulator_state: 'SimulatorState', count: int = 5):
+    # count is how many duplicate samples to emit per call: the default of 5
+    # assumes a ~20Hz caller (5 x 20 = 100Hz, roughly the 104Hz accelerometer/
+    # gyroscope rate SERVICE_LIST expects). A caller already ticking at 100Hz
+    # should pass count=1 -- otherwise it publishes at 500Hz, ~5x the expected
+    # rate, which wastes CPU serializing capnp messages and shrinks locationd's
+    # fixed-size (512 checkpoint) EKF rewind buffer to ~1s of history, right at
+    # the edge of the CAM_ODO_POSE_DELAY rewinds cameraOdometry needs.
+    for _ in range(count):
       dat = messaging.new_message('accelerometer', valid=True)
       dat.accelerometer.timestamp = dat.logMonoTime  # TODO: use the IMU timestamp
       dat.accelerometer.init('acceleration')
@@ -34,7 +45,11 @@ class SimulatedSensors:
       dat.gyroscope.gyroUncalibrated.v = [simulator_state.imu.gyroscope.x, simulator_state.imu.gyroscope.y, simulator_state.imu.gyroscope.z]
       self.pm.send('gyroscope', dat)
 
-  def send_gps_message(self, simulator_state: 'SimulatorState'):
+  def send_gps_message(self, simulator_state: 'SimulatorState', count: int = 10):
+    # As with send_imu_message: the default of 10 assumes a ~20Hz caller. A
+    # 100Hz caller must pass count=1 AND rate-limit calls to ~10Hz to match the
+    # 10Hz gpsLocationExternal rate SERVICE_LIST expects -- at 100Hz x 10 this
+    # publishes 1000 messages/sec, 100x the expected rate.
     if not simulator_state.valid:
       return
 
@@ -45,7 +60,7 @@ class SimulatedSensors:
       simulator_state.velocity.z,
     ]
 
-    for _ in range(10):
+    for _ in range(count):
       dat = messaging.new_message('gpsLocationExternal', valid=True)
       dat.gpsLocationExternal = {
         "unixTimestampMillis": int(time.time() * 1000),  # noqa: TID251
