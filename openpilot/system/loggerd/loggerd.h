@@ -74,7 +74,7 @@ public:
   const char *publish_name;
   const char *thumbnail_name = NULL;
   const char *filename = NULL;
-  bool record = true;
+  bool record = false;
   bool include_audio = false;
   bool is_live = false;
   int frame_width = -1;
