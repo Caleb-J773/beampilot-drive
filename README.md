@@ -558,8 +558,12 @@ constant — it is a property of the rack **part**:
 So a lookup table keyed on the car would be wrong the first time you fit a different rack. Two
 things make measuring it a non-problem instead:
 
-**It only has to be measured once.** Every good measurement is remembered in
-`~/.config/beampilot/steer_ratios.json`, keyed by vehicle *and* lock. From the next spawn onward
+**It only has to be measured once**, including across restarts. Every good measurement is
+remembered in `~/.config/beampilot/steer_ratios.json`, keyed by vehicle *and* lock — where the
+vehicle is `v.data.model` (`etk800`), not its display name. `v.data.information.name` is not
+reliably a string; on some vehicles it is a table, and `tostring()` on one gives an address that
+changes every launch, which would defeat the cache entirely by never matching. beampilot refuses
+to store a name like that rather than fill the file with keys that can never match again. From the next spawn onward
 that car is right immediately. It is plain JSON and meant to be edited — if one vehicle measured
 badly, correct its number there rather than pinning `BEAMPILOT_STEER_RATIO` for everything.
 

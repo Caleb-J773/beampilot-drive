@@ -322,6 +322,12 @@ These were each a real bug that cost significant debugging time. Don't regress t
   event in that Honda branch is guarded by `if self.CP.pcmCruise`, and `pcmCruise` is pinned
   False, so the branch is a no-op for the Civic too -- which is exactly why `pcmCruise` is pinned
   rather than left free to follow `alpha_long`.
+- **`v.data.information.name` is not reliably a string.** On some vehicles it is a table, and
+  BeamNG's own `chassisData.lua:98` assumes otherwise. `tostring()` on it yields
+  `"table: 0x7f..."` -- an address that changes every launch, which silently destroyed the steer
+  ratio cache (every key looked new, so every restart re-measured). Use `v.data.model`
+  (`"etk800"`); `vehicleDirectory` is the next best fallback. The Python side refuses to store a
+  name matching `^(table|function|userdata|thread): 0x` for the same reason.
 - **There is no `obj:getTotalMass()`.** Mass is `sum(node.nodeWeight)` over `v.data.nodes`, which
   is also where the centre of gravity and the yaw inertia come from.
 - **BeamNG's steering lock is a PART, not a car property.** An ETK 800 ships locks of 275, 360,

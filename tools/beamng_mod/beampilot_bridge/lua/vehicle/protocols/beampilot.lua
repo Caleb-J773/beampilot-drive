@@ -475,6 +475,34 @@ local function vehicleMassProperties(fwd, right)
   return mass, cogF, cogR, inertia
 end
 
+-- The name is the CACHE KEY on the openpilot side, so it has to be the same
+-- string every session. v.data.information.name is NOT reliably a string --
+-- some jbeams make it a table, and BeamNG's own chassisData.lua assumes
+-- otherwise -- and tostring() on a table gives "table: 0x7f...", an address
+-- that changes every launch. That silently defeats the whole cache: the key
+-- never matches, so the car is re-swept on every restart forever.
+--
+-- v.data.model ("etk800") is the stable identifier; the rest are fallbacks.
+local function firstString(...)
+  for i = 1, select("#", ...) do
+    local candidate = select(i, ...)
+    if type(candidate) == "string" and candidate ~= "" then return candidate end
+  end
+  return nil
+end
+
+local function vehicleIdentity()
+  local info = type(v.data.information) == "table" and v.data.information or nil
+  local name = firstString(
+    v.data.model,
+    info and info.name or nil,
+    v.data.vehicleDirectory,
+    v.config and v.config.model or nil)
+  if not name then return "unknown" end
+  -- "/vehicles/etk800/" -> "etk800"
+  return (name:gsub("^/?vehicles/", ""):gsub("/+$", ""))
+end
+
 local function vehicleMeasureStatic()
   local fwd, right = vehicleAxes()
   if not fwd then return false end
@@ -500,8 +528,7 @@ local function vehicleMeasureStatic()
     -- exactly the divisor beamngd needs to go the other way.
     steerLockDeg = (v.data.input and v.data.input.steeringWheelLock) or 0,
   }
-  vehicleName = (v.data.information and v.data.information.name)
-                or (v.config and v.config.model) or ""
+  vehicleName = vehicleIdentity()
   return true
 end
 

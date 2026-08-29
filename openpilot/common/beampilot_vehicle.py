@@ -57,6 +57,7 @@ and divides by the same rack. Nothing is left to a fudge factor.
 """
 import json
 import os
+import re
 import socket
 import struct
 import time
@@ -247,25 +248,47 @@ class SteerRatioCache:
   def __init__(self, path: str = RATIO_CACHE_PATH):
     self.path = path
     self.entries: dict[str, dict] = {}
+    self._warned_bad_name = False
     self.load()
+
+  @staticmethod
+  def usable_name(name: str) -> bool:
+    """Reject a name that will not be the same string next session.
+
+    Lua's tostring() on a table or function gives "table: 0x7f...", an address
+    that changes every launch. Caching under one is worse than not caching at
+    all: every entry looks new, the car is re-measured every restart, and the
+    file fills up with dead keys that will never match again. Silent, and
+    exactly the failure this cache exists to prevent -- so refuse it loudly
+    rather than store it.
+    """
+    name = (name or "").strip()
+    if not name or name == "unknown":
+      return False
+    return not re.match(r"^(table|function|userdata|thread):\s*0x[0-9a-f]+$", name)
 
   @staticmethod
   def key(name: str, lock_deg: float) -> str:
     """Vehicle plus rack. Rounded, so float noise cannot fragment the cache."""
-    return f"{name or 'unknown'}|{round(lock_deg)}"
+    return f"{name}|{round(lock_deg)}"
 
   def load(self) -> None:
     try:
       with open(self.path, encoding="utf-8") as f:
         loaded = json.load(f)
       if isinstance(loaded, dict):
-        self.entries = {k: v for k, v in loaded.items() if isinstance(v, dict)}
+        # Drop entries whose key can never match again -- see usable_name.
+        # They are dead weight from an older mod, not data.
+        self.entries = {k: v for k, v in loaded.items()
+                        if isinstance(v, dict) and self.usable_name(k.rsplit("|", 1)[0])}
     except (OSError, ValueError):
       # A missing or corrupt cache is not an error: it just means nothing has
       # been measured yet, which is where every vehicle starts anyway.
       self.entries = {}
 
   def get(self, name: str, lock_deg: float) -> float | None:
+    if not self.usable_name(name):
+      return None
     entry = self.entries.get(self.key(name, lock_deg))
     if not entry:
       return None
@@ -284,6 +307,13 @@ class SteerRatioCache:
     """
     lo, hi = LIMITS["steerRatio"]
     if samples < RATIO_CACHE_MIN_SAMPLES or not (lo <= ratio <= hi):
+      return False
+    if not self.usable_name(name):
+      if not self._warned_bad_name:
+        self._warned_bad_name = True
+        print(f"[beampilot] not remembering a steer ratio for {name!r}: that name will not be"
+              + " the same next session, so it could never be matched again."
+              + " Reinstall the mod (./setup_beampilot.sh) if this persists.", flush=True)
       return False
     key = self.key(name, lock_deg)
     existing = self.entries.get(key)
