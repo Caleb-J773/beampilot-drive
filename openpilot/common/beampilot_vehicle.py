@@ -160,6 +160,10 @@ def lua_config(calibrate: bool = True) -> dict[str, float]:
     "minSteerDeg": env_float("BEAMPILOT_GEOMETRY_MIN_STEER_DEG", 20.0),
     "minWheelDeg": env_float("BEAMPILOT_GEOMETRY_MIN_WHEEL_DEG", 0.3),
     "minSamples": float(env_int("BEAMPILOT_GEOMETRY_MIN_SAMPLES", 10)),
+    # The mod must use OUR idea of "enough", or it stops sweeping at a sample
+    # count we would refuse to store -- which measures forever and remembers
+    # nothing. Pushed down rather than duplicated for exactly that reason.
+    "cacheMinSamples": float(RATIO_CACHE_MIN_SAMPLES),
     # Sweep the rack once, while parked, rather than waiting for the driver to
     # happen to turn far enough. Passed as False once the ratio for this
     # vehicle and rack is already remembered -- there is nothing to learn, and a

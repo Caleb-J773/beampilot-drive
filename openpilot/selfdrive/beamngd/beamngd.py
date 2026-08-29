@@ -20,7 +20,8 @@ from openpilot.common.beampilot_bsm import (BSM_ENABLED, BlindSpotSender,
                                             flags_from_dash_lights, resolve)
 from openpilot.common.beampilot_bsm import lua_config as bsm_lua_config
 from openpilot.common.beampilot_radar import lua_config as radar_lua_config
-from openpilot.common.beampilot_vehicle import SteerRatioCache, VehicleGeometryReceiver
+from openpilot.common.beampilot_vehicle import (RATIO_CACHE_MIN_SAMPLES, SteerRatioCache,
+                                                VehicleGeometryReceiver)
 from openpilot.common.beampilot_vehicle import lua_config as vehicle_lua_config
 from openpilot.common.beampilot_vehicle import resolve as resolve_geometry
 from openpilot.common.beampilot_vehicle import env_overrides, steer_ratio_source
@@ -408,6 +409,7 @@ class BeamNGBridge:
     self.steer_lock_deg = MAX_STEERING_WHEEL_ANGLE_DEG
     self.steer_lock_warned = False
     self.steer_ratio_source = "the fingerprint's own value"
+    self.thin_measurement_warned = False
 
     # Mirrors the Lua mod's own isControlling gating: only push a neutral
     # reset on the disengage EDGE, never on every not-engaged tick -- emitting
@@ -643,6 +645,14 @@ class BeamNGBridge:
         print(f"[beamngd] remembered steerRatio {measured['steerRatio']:.2f} for"
               + f" {name or 'this vehicle'} at {measured['steerLockDeg']:.0f} deg lock"
               + f" -> {self.ratio_cache.path}", flush=True)
+      elif samples < RATIO_CACHE_MIN_SAMPLES and not self.thin_measurement_warned:
+        # Silence here is what made this hard to see: a ratio was arriving and
+        # being used, and nothing was ever written, with no reason given.
+        self.thin_measurement_warned = True
+        print(f"[beamngd] measuring steerRatio {measured['steerRatio']:.2f} for"
+              + f" {name or 'this vehicle'}, but {samples} samples is under the"
+              + f" {RATIO_CACHE_MIN_SAMPLES} needed to remember it. Keep driving,"
+              + " or stop and let it calibrate itself.", flush=True)
 
     values = resolve_geometry(measured, samples=samples, name=name, cache=self.ratio_cache)
     if values != self.geometry_applied:

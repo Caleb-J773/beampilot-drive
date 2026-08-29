@@ -155,6 +155,14 @@ local VEHICLE_DEFAULTS = {
   minSteerDeg = 20.0,   -- below this the road wheel angle is mostly toe-in
   minWheelDeg = 0.3,    -- ...and node jitter, and dividing by it is nonsense
   minSamples = 10,      -- do not report a ratio built from one odd moment
+  -- ...but do not consider the job DONE until there are enough samples that
+  -- openpilot will actually keep the answer. These were once the same number,
+  -- and the gap between them was a trap: ten samples of ordinary driving marked
+  -- the vehicle measured and cancelled the sweep, while the cache wanted two
+  -- hundred before it would store anything. Everything in between measured
+  -- forever and remembered nothing. beamngd overwrites this with its own
+  -- threshold, so the two cannot drift apart again.
+  cacheMinSamples = 200,
   -- Self-calibration. Rather than wait for the driver to happen to turn far
   -- enough, sweep the rack once while parked and read the answer off directly.
   -- This is what makes a per-vehicle steering-ratio TABLE unnecessary: BeamNG's
@@ -589,9 +597,9 @@ end
 -- parked is surprising; one that does it at speed would be dangerous.
 local function vehicleCalibrate(dtSim)
   if vehicleCfg.calibrate == 0 or calPhase == "done" then return end
-  if steerSamples >= vehicleCfg.minSamples and calPhase == "idle" then
-    calPhase = "done"   -- already measured from ordinary driving; nothing to do
-    return
+  if steerSamples >= vehicleCfg.cacheMinSamples and calPhase == "idle" then
+    calPhase = "done"   -- measured from ordinary driving, and solidly enough
+    return              -- that openpilot will keep it; nothing left to do
   end
 
   -- Nobody is listening, so there is nowhere for the answer to go: the cache
