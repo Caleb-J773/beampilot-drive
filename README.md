@@ -303,6 +303,9 @@ Too low makes openpilot oversteer, too high makes it run wide.
 | `BEAMPILOT_CAM_WINDOW` | `beamng` | Track the game window by name/class. See [Camera capture](#camera-capture). |
 | `BEAMPILOT_CAM_MONITOR` | `1` | Whole-monitor fallback. |
 | `BEAMPILOT_CAM_REGION` | unset | `left,top,width,height`, a fixed rectangle. |
+| `BEAMPILOT_CAM_RATE_HZ` | `20` | Capture rate. `modeld` is driven by these frames; raising it only helps if the GPU can keep up with the game *and* the model. |
+| `BEAMPILOT_CAM_RETRACK_S` | `2.0` | How often a tracked window's geometry is re-read. |
+| `BEAMPILOT_VIPC_BUFFERS` | `20` | VisionIPC ring depth per stream. |
 | `BEAMPILOT_IGNORE_COMM_ISSUE` | `0` | See warning below. |
 | `BLOCK` | `,soundd` | Processes not to start. `soundd` mutes alert chimes. |
 

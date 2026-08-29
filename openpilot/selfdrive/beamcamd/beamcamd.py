@@ -9,6 +9,7 @@ from openpilot.cereal import messaging
 from openpilot.common.realtime import Ratekeeper
 from msgq.visionipc import VisionIpcServer
 from openpilot.system.camerad.cameras.nv12_info import get_nv12_info
+from openpilot.common.beampilot_env import env_float, env_int
 from openpilot.selfdrive.beamcamd.window_capture import capture_support, find_window
 
 # Captures the BeamNG.drive window off the X11 desktop (the openpilot_cam BeamNG
@@ -16,18 +17,28 @@ from openpilot.selfdrive.beamcamd.window_capture import capture_support, find_wi
 # rigidly-mounted, FOV-matched forward camera view, not a driver-controlled one)
 # and republishes it as openpilot's road cameras.
 #
-# Capture is a fixed monitor/region, not an auto-detected window: BeamNG.drive is
-# expected to be running fullscreen/borderless on the configured display. Override
-# via env vars if that assumption doesn't hold for a given setup:
-#   BEAMPILOT_CAM_MONITOR  index into mss's monitor list (1 = first physical monitor,
-#                          0 = all monitors combined). Default 1.
-#   BEAMPILOT_CAM_REGION   "left,top,width,height" to capture a sub-region (e.g. a
-#                          windowed, non-fullscreen BeamNG instance) instead of the
-#                          whole monitor.
+# What gets captured, highest priority first (see get_capture_region):
+#   BEAMPILOT_CAM_REGION   "left,top,width,height" -- a fixed rectangle.
+#   BEAMPILOT_CAM_WINDOW   match text for the BeamNG window; tracked as it moves
+#                          or resizes. Needs X11 and xdotool.
+#   BEAMPILOT_CAM_MONITOR  index into mss's monitor list (1 = first physical
+#                          monitor, 0 = all combined). Default 1; also the
+#                          fallback when no window matches.
 
 TR = [1.0, 0.0, 0.0,
       0.0, 1.0, 0.0,
       0.0, 0.0, 1.0]
+
+# SERVICE_LIST expects road cameras at 20Hz; modeld is driven by these frames,
+# so raising it only helps if the GPU can keep up with both the game and the
+# model, and lowering it starves the model.
+CAMERA_RATE_HZ = env_float("BEAMPILOT_CAM_RATE_HZ", 20.0)
+# How often to re-read a tracked window's geometry. Every frame would mean
+# spawning xdotool at the capture rate, which is far too expensive; the window
+# only moves when the user moves it.
+RETRACK_INTERVAL_S = env_float("BEAMPILOT_CAM_RETRACK_S", 2.0)
+# VisionIPC ring buffer depth, per stream.
+VIPC_BUFFER_COUNT = env_int("BEAMPILOT_VIPC_BUFFERS", 20)
 
 
 def get_capture_region(sct: mss.MSS) -> dict:
@@ -116,8 +127,8 @@ def main():
   stride, y_height, uv_height, size = get_nv12_info(W, H)
   uv_offset = stride * y_height
 
-  server.create_buffers_with_sizes(VisionStreamType.VISION_STREAM_WIDE_ROAD, 20, W, H, size, stride, uv_offset)
-  server.create_buffers_with_sizes(VisionStreamType.VISION_STREAM_NARROW_ROAD, 20, W, H, size, stride, uv_offset)
+  server.create_buffers_with_sizes(VisionStreamType.VISION_STREAM_WIDE_ROAD, VIPC_BUFFER_COUNT, W, H, size, stride, uv_offset)
+  server.create_buffers_with_sizes(VisionStreamType.VISION_STREAM_NARROW_ROAD, VIPC_BUFFER_COUNT, W, H, size, stride, uv_offset)
   server.create_buffers_with_sizes(VisionStreamType.VISION_STREAM_CABIN, 4, W, H, size, stride, uv_offset)
 
   server.start_listener()
@@ -132,7 +143,7 @@ def main():
   sct = mss.mss()
   region = get_capture_region(sct)
 
-  rate = Ratekeeper(20, print_delay_threshold=None)
+  rate = Ratekeeper(CAMERA_RATE_HZ, print_delay_threshold=None)
   frame_id = 0
 
   # When tracking a window, re-read its geometry occasionally so moving or
@@ -141,11 +152,10 @@ def main():
   # spawn, which is far too expensive at 20Hz.
   track_window = bool(os.environ.get("BEAMPILOT_CAM_WINDOW", "").strip()) and \
                  not os.environ.get("BEAMPILOT_CAM_REGION")
-  retrack_interval = 2.0
   last_retrack = time.monotonic()
 
   while True:
-    if track_window and (time.monotonic() - last_retrack) > retrack_interval:
+    if track_window and (time.monotonic() - last_retrack) > RETRACK_INTERVAL_S:
       last_retrack = time.monotonic()
       win = find_window(os.environ.get("BEAMPILOT_CAM_WINDOW", "").strip())
       if win is not None:

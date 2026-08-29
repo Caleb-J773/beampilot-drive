@@ -7,16 +7,21 @@ import time
 
 import openpilot.cereal.messaging as messaging
 from openpilot.cereal.services import SERVICE_LIST
+from openpilot.common.beampilot_env import env_float, env_int, env_str
 
 print("=" * 72)
 print("STAGE 1: raw UDP telemetry from the BeamNG Lua mod (mod -> beamngd)")
 print("=" * 72)
 
+# Must match getStructDefinition() in the Lua mod, and the ports must match
+# its TELEMETRY_PORT/CONTROL_PORT -- vehicle Lua cannot read this environment.
 TELEMETRY_STRUCT = struct.Struct("<4sffffffiI" + "f" * 15)
+BEAMNG_ADDRESS = env_str("BEAMPILOT_BEAMNG_ADDRESS", "127.0.0.1")
+TELEMETRY_PORT = env_int("BEAMPILOT_TELEMETRY_PORT", 49152)
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 sock.settimeout(3.0)
 try:
-  sock.bind(("127.0.0.1", 49152))
+  sock.bind((BEAMNG_ADDRESS, TELEMETRY_PORT))
   n, first = 0, None
   t0 = time.monotonic()
   while time.monotonic() - t0 < 3.0:
@@ -44,7 +49,7 @@ except OSError:
   # would STEAL packets from beamngd, breaking the very thing we're measuring).
   # beamngd holding the port is itself proof beamngd is running; STAGE 3 then
   # confirms the mod is really feeding it by checking live carState values.
-  print("  port 49152 held by beamngd (expected while the stack is running)")
+  print(f"  port {TELEMETRY_PORT} held by beamngd (expected while the stack is running)")
   print("  -> beamngd IS running; see STAGE 3 for whether the mod is feeding it")
 
 print()
@@ -64,7 +69,7 @@ CHANNELS = [c for c in CHANNELS if c in SERVICE_LIST]
 
 socks = {c: messaging.sub_sock(c, conflate=False, timeout=10) for c in CHANNELS}
 counts = dict.fromkeys(CHANNELS, 0)
-DURATION = 5.0
+DURATION = env_float("BEAMPILOT_DIAG_SECONDS", 5.0)
 t0 = time.monotonic()
 while time.monotonic() - t0 < DURATION:
   for c in CHANNELS:

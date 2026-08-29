@@ -13,10 +13,14 @@ Usage:
   uv run python tools/beampilot_monitor.py --once   # one snapshot, for pasting
 """
 import argparse
+import re
+import shutil
+import sys
 import time
 
 import openpilot.cereal.messaging as messaging
 from openpilot.cereal.services import SERVICE_LIST
+from openpilot.common.beampilot_env import env_float
 from openpilot.selfdrive.controls.lib.drive_helpers import MAX_CURVATURE, MAX_LATERAL_ACCEL_NO_ROLL, MIN_SPEED
 
 # Everything our bridge produces, plus the downstream state it drives.
@@ -31,7 +35,16 @@ STATE_CHANNELS = [
 ]
 ALL = [c for c in INPUT_CHANNELS + STATE_CHANNELS if c in SERVICE_LIST]
 
+WIDTH = 78                      # header rule width; output is clipped to the real terminal width
+WINDOW_SECONDS = env_float("BEAMPILOT_MONITOR_WINDOW", 2.0)
+# A channel is flagged when its measured rate falls outside this band around the
+# rate SERVICE_LIST expects. Wide enough not to cry over normal jitter.
+RATE_OK_LOW = env_float("BEAMPILOT_MONITOR_RATE_LOW", 0.7)
+RATE_OK_HIGH = env_float("BEAMPILOT_MONITOR_RATE_HIGH", 1.4)
+MS_PER_S = 2.237                # m/s -> mph
+
 GREEN, RED, YEL, DIM, RST = "\033[32m", "\033[31m", "\033[33m", "\033[2m", "\033[0m"
+ANSI_RE = re.compile(r"\033\[[0-9;?]*[a-zA-Z]")
 
 
 def fmt_rate(name, count, elapsed):
@@ -39,15 +52,50 @@ def fmt_rate(name, count, elapsed):
   exp = SERVICE_LIST[name].frequency
   if meas == 0:
     return f"{RED}{meas:7.1f}Hz SILENT{RST}"
-  if exp and not (0.7 < meas / exp < 1.4):
+  if exp and not (RATE_OK_LOW < meas / exp < RATE_OK_HIGH):
     return f"{YEL}{meas:7.1f}Hz (want {exp:.0f}){RST}"
   return f"{GREEN}{meas:7.1f}Hz{RST}"
+
+
+def visible_len(s: str) -> int:
+  """Length ignoring ANSI colour codes, so padding lines up."""
+  return len(ANSI_RE.sub("", s))
+
+
+def draw(lines: list[str]) -> None:
+  """Repaint in place without scrolling.
+
+  A plain "clear screen then print" (\\033[2J) only clears the VISIBLE screen.
+  As soon as the output is taller than the terminal, the terminal scrolls and
+  every refresh shoves another screenful into the scrollback -- which is how you
+  end up with a thousand copies. Instead: home the cursor, overwrite each line
+  and erase the rest of it (\\033[K), truncate to the window height so nothing
+  can ever scroll, then erase everything below (\\033[J).
+  """
+  cols, rows = shutil.get_terminal_size((80, 24))
+  # Section headers embed a leading "\n", so one list entry can be two terminal
+  # rows. Flatten first or the height truncation undercounts and the display
+  # scrolls anyway -- the exact thing this function exists to prevent.
+  flat: list[str] = []
+  for entry in lines:
+    flat.extend(entry.split("\n"))
+  body = flat[:max(rows - 1, 1)]
+  buf = ["\033[H"]
+  for line in body:
+    # trim to the terminal width so a long line can't wrap and push everything down
+    while visible_len(line) > cols:
+      line = line[:-1]
+    buf.append(line + "\033[K\n")
+  buf.append("\033[J")
+  sys.stdout.write("".join(buf))
+  sys.stdout.flush()
 
 
 def main():
   ap = argparse.ArgumentParser()
   ap.add_argument("--once", action="store_true", help="print one snapshot and exit")
-  ap.add_argument("--window", type=float, default=2.0, help="seconds per rate sample")
+  ap.add_argument("--window", type=float, default=WINDOW_SECONDS,
+                  help=f"seconds per rate sample (default {WINDOW_SECONDS})")
   args = ap.parse_args()
 
   socks = {c: messaging.sub_sock(c, conflate=False, timeout=5) for c in ALL}
@@ -66,11 +114,9 @@ def main():
       el = time.monotonic() - t0
 
       out = []
-      if not args.once:
-        out.append("\033[2J\033[H")  # clear screen, home cursor
-      out.append("=" * 78)
+      out.append("=" * WIDTH)
       out.append(f" BEAMPILOT LIVE MONITOR   ({el:.1f}s sample)")
-      out.append("=" * 78)
+      out.append("=" * WIDTH)
 
       out.append(f"\n{DIM}--- INPUTS: what beamngd + beamcamd send INTO openpilot ---{RST}")
       for c in INPUT_CHANNELS:
@@ -84,13 +130,13 @@ def main():
 
       cs = sm['carState']
       out.append(f"\n{DIM}--- carState (what openpilot sees after decoding our CAN) ---{RST}")
-      out.append(f"  vEgo            {cs.vEgo:8.3f} m/s ({cs.vEgo * 2.237:6.2f} mph)   vEgoRaw {cs.vEgoRaw:8.3f}")
+      out.append(f"  vEgo            {cs.vEgo:8.3f} m/s ({cs.vEgo * MS_PER_S:6.2f} mph)   vEgoRaw {cs.vEgoRaw:8.3f}")
       out.append(f"  steeringAngle   {cs.steeringAngleDeg:+8.2f} deg      steeringRate {cs.steeringRateDeg:+8.2f}")
       out.append(f"  steeringTorque  {cs.steeringTorque:+8.2f}          steeringPressed {cs.steeringPressed}")
       out.append(f"  gasPressed {cs.gasPressed}   brakePressed {cs.brakePressed}   parkingBrake {cs.parkingBrake}")
       cspd = cs.cruiseState.speed
-      out.append(f"  cruise: enabled={cs.cruiseState.enabled} available={cs.cruiseState.available} speed={cspd:6.2f} m/s ({cspd * 2.237:5.1f} mph)")
-      out.append(f"  vCruise {cs.vCruise:6.2f} ({cs.vCruise * 2.237:5.1f} mph)   <- the SET SPEED openpilot targets")
+      out.append(f"  cruise: enabled={cs.cruiseState.enabled} available={cs.cruiseState.available} speed={cspd:6.2f} m/s ({cspd * MS_PER_S:5.1f} mph)")
+      out.append(f"  vCruise {cs.vCruise:6.2f} ({cs.vCruise * MS_PER_S:5.1f} mph)   <- the SET SPEED openpilot targets")
       out.append(f"  standstill {cs.standstill}   gear {cs.gearShifter}   blinkers L={cs.leftBlinker} R={cs.rightBlinker}")
       out.append(f"  canValid {cs.canValid}   canTimeout {cs.canTimeout}")
 
@@ -136,9 +182,10 @@ def main():
       out.append(f"  deviceMotion inputsOK={dm.inputsOK} sensorsOK={dm.sensorsOK} posenetOK={dm.posenetOK}")
       out.append(f"  calibration status={ec.calStatus} validBlocks={ec.validBlocks} rpy={[round(v, 4) for v in ec.rpyCalib]}")
 
-      print("\n".join(out), flush=True)
       if args.once:
+        print("\n".join(out), flush=True)
         return
+      draw(out)
   except KeyboardInterrupt:
     print("\nstopped")
 
