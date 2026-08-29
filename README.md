@@ -47,8 +47,8 @@ you spawn, there's no real wide-angle camera, and it will drive into things if y
 | | |
 |---|---|
 | **OS** | Linux. openpilot is Linux-only; BeamNG.drive ships a native Linux build, so no Proton. |
-| **GPU** | Anything [tinygrad](https://tinygrad.org) supports (NVIDIA or AMD). It renders the game *and* runs the driving model simultaneously. |
-| **VRAM** | 4 GB standard model, 8 GB for chestnut-class. |
+| **GPU** | NVIDIA or AMD. It renders the game *and* runs the driving model simultaneously. Four [tinygrad backends](#gpu-backend) to pick from — an older card that `NV`/`AMD` refuse still works through `cuda` or `cl`. |
+| **VRAM** | 4 GB standard model. Chestnut's weights are 1.8 GB, but see [Chestnut](#chestnut) — compute, not memory, is what stops it. |
 | **RAM** | 16 GB standard, 32 GB chestnut. |
 | **Groups** | Your user needs to be in `input` (keyboard reads, and `/dev/uinput` for joystick mode). |
 | **Display** | X11. Wayland works via XWayland in most cases — see [Wayland](#wayland). |
@@ -57,7 +57,9 @@ you spawn, there's no real wide-angle camera, and it will drive into things if y
 > [!NOTE]
 > These are conservative rather than measured floors. The GPU is the real constraint: it's
 > shared between rendering and inference, and a weaker card shows up as dropped camera frames
-> before anything else breaks.
+> before anything else breaks. For reference, the standard model is one 2.4 ms forward pass on
+> an RTX 3060 and 8.3 ms on a GTX 1660 SUPER, against a 50 ms budget — the model itself is not
+> the expensive part.
 
 ### Dependencies
 
@@ -155,7 +157,7 @@ for you.
 | | |
 |---|---|
 | **OS and Python** | Linux, and whether Python 3.12 is available (uv fetches it otherwise). |
-| **GPU** | Detected via `nvidia-smi` and `lspci`, with the right `USE_NV`/`USE_AMD` to set. |
+| **GPU** | Detected via `nvidia-smi` and `lspci`, with a verdict per card and which `BEAMPILOT_BACKEND` it can use. |
 | **Display server** | X11 vs Wayland, whether capture will work, and whether `xdotool` is present. |
 | **Permissions** | `input` group membership, with the `usermod` line if you're missing it. |
 | **BeamNG** | Finds the game and your userfolder by parsing Steam's `libraryfolders.vdf`, so installs on secondary drives and flatpak Steam are found rather than guessed at. |
@@ -263,35 +265,98 @@ crash.
 
 | Setting | Default | |
 |---|---|---|
-| `USE_NV` / `USE_AMD` | `USE_NV=1` | GPU backend. Set exactly one. |
-| `BEAMPILOT_GPU_INDEX` | auto-detected | Which GPU tinygrad uses. See below. |
-| `CHESTNUT` | `0` | Larger model. Needs 8 GB VRAM. |
+| `BEAMPILOT_BACKEND` | `nv` | Which tinygrad backend runs the model: `nv`, `amd`, `cuda`, `cl`. See below. |
+| `USE_NV` / `USE_AMD` | `USE_NV=1` | The upstream spelling. Only consulted when `BEAMPILOT_BACKEND` is unset. |
+| `BEAMPILOT_GPU_INDEX` | auto-detected | Which GPU, in `nvidia-smi` numbering, for every backend. See below. |
+| `CHESTNUT` | `0` | The 877 M-parameter model. See [Chestnut](#chestnut). |
 | `BIG` | `1` | Window resolution: `1` = 2160×1080 (comma 3/3X), `0` = 536×240 (comma 4). Not a scale knob. |
 | `SCALE` | unset | Multiplies the above. `0.6` ≈ 1296×648. |
 
-#### GPU selection
+#### GPU backend
 
-tinygrad's backends are **not** CUDA or ROCm — they drive the card through raw ioctls, and each
-supports only a limited range of hardware:
+Four backends, and what separates them is not speed — it's which cards they will open at all.
 
-| Backend | Requires |
-|---|---|
-| `NV` | Compute capability **≥ 8.0** (Ampere or newer) |
-| `AMD` | **gfx942, gfx950, or gfx11xx/gfx12xx**, plus membership of the `render` group for `/dev/kfd` |
+| `BEAMPILOT_BACKEND` | tinygrad | Runs on |
+|---|---|---|
+| `nv` | `NV` | NVIDIA, compute capability **≥ 8.0 only** (Ampere or newer) |
+| `amd` | `AMD` | **gfx942, gfx950, gfx11xx, gfx12xx**, plus the `render` group for `/dev/kfd` |
+| `cuda` | `CUDA` | Any NVIDIA back to Maxwell, through libcuda/nvrtc. Tensor cores included. |
+| `cl` | `CL` | Anything with an OpenCL ICD — NVIDIA, AMD, Intel. **No tensor cores** in tinygrad. |
 
-An unsupported card is not merely slow — it cannot run the model at all, and the failure is
-obscure: `modeld` dies during model load with a bare `StopIteration` deep inside
-`tinygrad/runtime/ops_nv.py`, which surfaces only as
-`{"event": "process_not_running", "not_running": "{'modeld'}"}`.
+`nv` and `amd` are tinygrad's own drivers: they talk to the card in raw ioctls, bypassing the
+vendor userspace entirely. That is why they are narrow. `ops_nv.py` looks up the *Ampere*
+command classes (`AMPERE_CHANNEL_GPFIFO_A`, `AMPERE_COMPUTE_B`) with a bare `next()`, so on
+anything older the generator is empty and the failure is a `StopIteration` from
+`tinygrad/runtime/ops_nv.py:441`, surfacing only as
+`{"event": "process_not_running", "not_running": "{'modeld'}"}`. It is not about tensor cores —
+an RTX 2060 has them and fails identically.
 
-This bites on **mixed-GPU machines**, where tinygrad defaults to index 0 and index 0 may be the
-card it can't use. On the development machine a GTX 1660 SUPER (Turing, 7.5) enumerates ahead of
-an RTX 3060 (Ampere, 8.6), so the default was always wrong.
+`cuda` and `cl` go through the vendor's own stack and have no such limit. **Use `cuda` for a
+pre-Ampere NVIDIA card**; it is the closest in speed and keeps tensor cores. `cl` is the widest
+net and the fallback for a card no other backend will take.
 
-`config_beampilot.sh` therefore detects the first usable card and sets tinygrad's
-`DEV=":<index>+NV"` (the index goes *before* the `+`). It detects rather than hardcodes because
-enumeration follows the PCI bus and shifts when cards are reseated. Override with
-`BEAMPILOT_GPU_INDEX`. `tools/beampilot_setup.py` prints each card with a verdict.
+Measured here on the standard 30 M-parameter model, one forward pass against the 50 ms budget
+at 20 Hz:
+
+| | RTX 3060 (sm_86) | GTX 1660 SUPER (sm_75) |
+|---|---|---|
+| `nv` | **2.55 ms** | `StopIteration` — unsupported |
+| `cuda` | **2.44 ms** | 8.29 ms |
+| `cl` | 5.38 ms | 7.75 ms |
+
+So a 1660 SUPER runs the standard model with about 6× headroom. On the 3060 `cl` costs a little
+over 2× against `cuda`, which is the tensor-core gap (`OpenCLRenderer` declares none).
+
+##### Which GPU
+
+`BEAMPILOT_GPU_INDEX` is `nvidia-smi`'s numbering for every backend, and blank means auto-detect:
+the first card the backend can actually drive for `nv`/`amd`, the most capable one for `cuda`/`cl`
+(which will take any of them). Detected rather than hardcoded, because enumeration follows the
+PCI bus and shifts when cards are reseated. `tools/beampilot_setup.py` prints each card with a
+verdict.
+
+Getting the index *to* tinygrad differs by backend, which is a trap worth knowing about:
+
+- `nv` and `amd` are HCQ backends, where the index is a **visibility filter** and belongs before
+  the `+`: `DEV=":1+NV"`. The obvious `DEV=NV:1` sets the *renderer* to `"1"` (see `Target.parse`
+  in `tinygrad/helpers.py`) and opens GPU 0 regardless — silently the wrong card.
+- `cuda` and `cl` are not HCQ and take no index at all. The card is chosen by hiding the others
+  with `CUDA_VISIBLE_DEVICES`, which NVIDIA's OpenCL ICD honours as well as libcuda.
+  `CUDA_DEVICE_ORDER=PCI_BUS_ID` goes with it: the default CUDA ordering is fastest-first, the
+  *reverse* of `nvidia-smi`'s on a mixed machine, so without it the index would mean a different
+  card here than it does for `nv`.
+
+All of this is **build-time as well as runtime** — the model is compiled to a `.pkl` holding
+programs for one backend — so changing either means re-running `setup_beampilot.sh`.
+
+#### Chestnut
+
+`CHESTNUT=1` swaps the driving model for comma's large one. It is not a small step up:
+
+| | standard | chestnut |
+|---|---|---|
+| parameters | 30.0 M | **877.4 M** |
+| weights (fp16) | 60 MB | **1755 MB** |
+| graph | 351 nodes, conv-heavy (60 `Conv`, 82 `Gemm`) | 874 nodes, transformer (136 `MatMul`, 89 `LayerNorm`) |
+
+**VRAM is not the wall.** Measured at inference it takes ~1.8 GB, so a 4 GB card holds it.
+Compute is:
+
+| one forward pass | RTX 3060 | GTX 1660 SUPER |
+|---|---|---|
+| `nv` | 63.2 ms | unsupported |
+| `cuda` | **56.5 ms** | 299 ms |
+| `cl` | 248.8 ms | 425 ms |
+
+Against a 50 ms budget at 20 Hz, an RTX 3060 does not keep up — about 17 Hz at best. The tensor
+core dependence is stark: `cl` is 4.4× slower than `cuda` on the 3060, where on the small model
+it was 2×.
+
+Those are the raw ONNX graph through `OnnxRunner`, not a `BEAM`-searched build, so a tuned
+compile should do better — but not 6× better on the 1660. Note also that `CHESTNUT=1` forces
+`DEV=AMD` in `modeld/SConscript`'s `usbgpu_tg_flags` regardless of the backend above: the model
+is built for comma's Chestnut USB eGPU accessory, and `usbgpu_present()` is just
+`CHESTNUT == "1"` with no actual detection.
 
 ### Driving limits
 

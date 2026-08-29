@@ -326,9 +326,34 @@ export BEAMPILOT_RADAR_INDICATOR="1"
 export BLOCK="${BLOCK},soundd,uploader,manage_athenad"
 export HSA_ENABLE_DXG_DETECTION=1
 
-# to use gpu, pick one, (AMD) or (NV)idia
-# AMD iGPU compute needs the user in the `render` group (not set up here);
-# using the RTX 3060 instead -- confirmed present and in host/nvidia mode.
+# --- which tinygrad backend runs the model ------------------------------
+# nv    tinygrad's own NVIDIA driver. Fastest path on Ampere or newer, and the
+#       only one that needs no vendor userspace at all -- but it talks to the
+#       card in raw ioctls and only implements Ampere-and-newer command
+#       classes, so ANYTHING older than compute 8.0 fails. See below.
+# amd   same idea for AMD: gfx942, gfx950, gfx11xx or gfx12xx only, plus the
+#       `render` group for /dev/kfd.
+# cuda  NVIDIA's own stack, through libcuda and nvrtc. Works on every NVIDIA
+#       card back to Maxwell, tensor cores included, at roughly NV's speed.
+#       This is the compatibility option for a pre-Ampere NVIDIA card.
+# cl    OpenCL. The widest net -- any card with a working ICD, NVIDIA, AMD or
+#       Intel -- and the only one with no tensor core support in tinygrad
+#       (OpenCLRenderer declares none), which costs little on a conv model and
+#       a lot on the chestnut transformer.
+#
+# Measured here, 8 chained 3x3 convs over a 1x32x256x512 tensor:
+#
+#            backend   RTX 3060 (sm_86)   GTX 1660 SUPER (sm_75)
+#            nv           18.1 ms          StopIteration -- unsupported
+#            cuda         15.2 ms           35.3 ms
+#            cl           14.1 ms           35.2 ms
+#
+# BUILD-time as well as runtime: the model is compiled for one backend, so
+# changing this means re-running setup_beampilot.sh.
+export BEAMPILOT_BACKEND="nv"
+
+# USE_NV / USE_AMD are the upstream openpilot spelling and still work; they are
+# only consulted when BEAMPILOT_BACKEND is unset.
 # export USE_AMD=1
 export USE_NV="1"
 
@@ -383,41 +408,125 @@ _bp_amd_gpu_index() {
   return 1
 }
 
-if [ -z "${DEV}" ]; then
-  if [ "${USE_NV}" = "1" ]; then
-    if [ -z "${BEAMPILOT_GPU_INDEX}" ] && command -v nvidia-smi >/dev/null 2>&1; then
-      # First GPU with compute capability >= 8.0. awk rather than sort, so the
-      # lowest usable index wins and NVIDIA's own ordering is preserved.
-      BEAMPILOT_GPU_INDEX="$(nvidia-smi --query-gpu=index,compute_cap --format=csv,noheader 2>/dev/null \
+# First NVIDIA index tinygrad's NV backend can actually drive (compute >= 8.0).
+# awk rather than sort, so the lowest usable index wins and NVIDIA's own
+# ordering is preserved.
+_bp_nv_gpu_index() {
+  command -v nvidia-smi >/dev/null 2>&1 || return 1
+  _i="$(nvidia-smi --query-gpu=index,compute_cap --format=csv,noheader 2>/dev/null \
         | awk -F', *' '{ if ($2 + 0 >= 8.0) { print $1; exit } }')"
-    fi
-    if [ -n "${BEAMPILOT_GPU_INDEX}" ]; then
-      export DEV=":${BEAMPILOT_GPU_INDEX}+NV"
-      echo "[beampilot] tinygrad NV -> GPU ${BEAMPILOT_GPU_INDEX} (DEV=${DEV})"
-    else
-      echo "[beampilot] WARNING: no Ampere-or-newer NVIDIA GPU found (tinygrad's NV backend" \
-           "needs compute capability >= 8.0). modeld will fail at model load with a" \
-           "StopIteration in ops_nv.py. Set BEAMPILOT_GPU_INDEX to override." >&2
-    fi
-  elif [ "${USE_AMD}" = "1" ]; then
-    [ -n "${BEAMPILOT_GPU_INDEX}" ] || BEAMPILOT_GPU_INDEX="$(_bp_amd_gpu_index)"
-    if [ -n "${BEAMPILOT_GPU_INDEX}" ]; then
-      export DEV=":${BEAMPILOT_GPU_INDEX}+AMD"
-      echo "[beampilot] tinygrad AMD -> GPU ${BEAMPILOT_GPU_INDEX} (DEV=${DEV})"
-    else
-      echo "[beampilot] WARNING: no AMD GPU that tinygrad supports (needs gfx942, gfx950," \
-           "or gfx11xx/gfx12xx). modeld will fail with 'Unsupported arch'." \
-           "Set BEAMPILOT_GPU_INDEX to override, or USE_NV=1 for an NVIDIA card." >&2
-    fi
-    # /dev/kfd is render-group owned; without it every AMD device open fails.
-    if ! id -nG 2>/dev/null | tr ' ' '\n' | grep -qx render; then
-      echo "[beampilot] WARNING: $(id -un) is not in the 'render' group, so /dev/kfd is not" \
-           "accessible and the AMD backend cannot open the GPU." \
-           "Fix with: sudo usermod -aG render $(id -un)  (then log out and back in)" >&2
-    fi
+  [ -n "$_i" ] || return 1
+  echo "$_i"
+}
+
+# For CUDA and OpenCL, which will open ANY NVIDIA card. "First" would be an
+# arbitrary pick on a mixed machine -- and here it is the slow one -- so take
+# the highest compute capability, lowest index breaking a tie.
+_bp_best_nv_index() {
+  command -v nvidia-smi >/dev/null 2>&1 || return 1
+  _i="$(nvidia-smi --query-gpu=index,compute_cap --format=csv,noheader 2>/dev/null \
+        | awk -F', *' '{ if ($2 + 0 > best) { best = $2 + 0; idx = $1 } } END { if (idx != "") print idx }')"
+  [ -n "$_i" ] || return 1
+  echo "$_i"
+}
+
+# nv / amd / cuda / cl. BEAMPILOT_BACKEND wins; USE_NV and USE_AMD are the
+# upstream spelling and still work.
+if [ -n "${BEAMPILOT_BACKEND}" ]; then
+  _bp_backend="$(printf '%s' "${BEAMPILOT_BACKEND}" | tr 'A-Z' 'a-z')"
+elif [ "${USE_AMD}" = "1" ]; then
+  _bp_backend="amd"
+elif [ "${USE_NV}" = "1" ]; then
+  _bp_backend="nv"
+else
+  _bp_backend=""
+fi
+
+case "${_bp_backend}" in
+  nv)   BEAMPILOT_TG_BACKEND="NV" ;;
+  amd)  BEAMPILOT_TG_BACKEND="AMD" ;;
+  cuda) BEAMPILOT_TG_BACKEND="CUDA" ;;
+  cl|opencl) _bp_backend="cl"; BEAMPILOT_TG_BACKEND="CL" ;;
+  "")   BEAMPILOT_TG_BACKEND="" ;;
+  *)    echo "[beampilot] WARNING: BEAMPILOT_BACKEND=${BEAMPILOT_BACKEND} is not one of" \
+             "nv / amd / cuda / cl. Falling back to CPU, which will not keep up." >&2
+        _bp_backend=""; BEAMPILOT_TG_BACKEND="" ;;
+esac
+
+# Keep USE_NV/USE_AMD consistent with the choice, since setup and the openpilot
+# build still read them, and a stale pair contradicting BEAMPILOT_BACKEND is a
+# confusing way to end up building for the wrong card. cuda and cl are the
+# NVIDIA-or-anything backends, so they ride under USE_NV.
+if [ "${_bp_backend}" = "amd" ]; then
+  export USE_AMD=1; unset USE_NV
+elif [ -n "${_bp_backend}" ]; then
+  export USE_NV=1; unset USE_AMD
+fi
+
+if [ -z "${DEV}" ] && [ -n "${BEAMPILOT_TG_BACKEND}" ]; then
+  case "${_bp_backend}" in
+    nv)
+      [ -n "${BEAMPILOT_GPU_INDEX}" ] || BEAMPILOT_GPU_INDEX="$(_bp_nv_gpu_index)"
+      if [ -n "${BEAMPILOT_GPU_INDEX}" ]; then
+        # NV and AMD are HCQ backends: the index is a VISIBILITY filter and goes
+        # before the '+' (hcq_filter_visible_devices reads Target.indices). The
+        # more obvious "DEV=NV:1" sets the RENDERER to "1" instead and quietly
+        # opens GPU 0 -- which on a mixed machine is the wrong card, and here is
+        # the unsupported one.
+        export DEV=":${BEAMPILOT_GPU_INDEX}+NV"
+      else
+        echo "[beampilot] WARNING: no Ampere-or-newer NVIDIA GPU found (tinygrad's NV backend" \
+             "needs compute capability >= 8.0). modeld will fail at model load with a" \
+             "StopIteration in ops_nv.py. Use BEAMPILOT_BACKEND=cuda for an older card," \
+             "or set BEAMPILOT_GPU_INDEX to override." >&2
+      fi
+      ;;
+    amd)
+      [ -n "${BEAMPILOT_GPU_INDEX}" ] || BEAMPILOT_GPU_INDEX="$(_bp_amd_gpu_index)"
+      if [ -n "${BEAMPILOT_GPU_INDEX}" ]; then
+        export DEV=":${BEAMPILOT_GPU_INDEX}+AMD"
+      else
+        echo "[beampilot] WARNING: no AMD GPU that tinygrad supports (needs gfx942, gfx950," \
+             "or gfx11xx/gfx12xx). modeld will fail with 'Unsupported arch'." \
+             "Use BEAMPILOT_BACKEND=cl for an older card, or set BEAMPILOT_GPU_INDEX." >&2
+      fi
+      # /dev/kfd is render-group owned; without it every AMD device open fails.
+      if ! id -nG 2>/dev/null | tr ' ' '\n' | grep -qx render; then
+        echo "[beampilot] WARNING: $(id -un) is not in the 'render' group, so /dev/kfd is not" \
+             "accessible and the AMD backend cannot open the GPU." \
+             "Fix with: sudo usermod -aG render $(id -un)  (then log out and back in)" >&2
+      fi
+      ;;
+    cuda|cl)
+      # Neither is an HCQ backend, so ":N+DEV" does nothing for them and
+      # "DEV=CL:1" is read as a RENDERER name ("CL has no renderer '1'"). The
+      # card is selected out of band instead, by hiding the others.
+      #
+      # CUDA_VISIBLE_DEVICES is honoured by NVIDIA's OpenCL ICD as well as by
+      # libcuda. CUDA_DEVICE_ORDER=PCI_BUS_ID matters: the default ordering is
+      # fastest-first, which is the REVERSE of nvidia-smi's on a mixed machine,
+      # so without it BEAMPILOT_GPU_INDEX would mean a different card here than
+      # it does for the NV backend above.
+      [ -n "${BEAMPILOT_GPU_INDEX}" ] || BEAMPILOT_GPU_INDEX="$(_bp_best_nv_index)"
+      if [ -n "${BEAMPILOT_GPU_INDEX}" ] && command -v nvidia-smi >/dev/null 2>&1; then
+        export CUDA_DEVICE_ORDER=PCI_BUS_ID
+        export CUDA_VISIBLE_DEVICES="${BEAMPILOT_GPU_INDEX}"
+      fi
+      export DEV="${BEAMPILOT_TG_BACKEND}"
+      ;;
+  esac
+  if [ -n "${DEV}" ]; then
+    echo "[beampilot] tinygrad ${BEAMPILOT_TG_BACKEND} -> GPU ${BEAMPILOT_GPU_INDEX:-default} (DEV=${DEV}${CUDA_VISIBLE_DEVICES:+, CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}})"
   fi
 fi
-unset -f _bp_amd_gpu_index 2>/dev/null || true
+
+# What the openpilot build should compile the model for. modeld/SConscript
+# prefers these over re-deriving the backend, so build and runtime cannot
+# disagree about which card the .pkl was compiled for.
+export BEAMPILOT_TG_BACKEND
+[ -n "${DEV}" ] && export BEAMPILOT_TG_DEV="${DEV}"
+
+unset -f _bp_amd_gpu_index _bp_nv_gpu_index _bp_best_nv_index 2>/dev/null || true
 
 # tici (c3 big) vs mici (c4 small)
 # do 1 for tici, 0 for mici
@@ -458,6 +567,6 @@ export CHESTNUT="0"
 export BEAMPILOT_CAM_MONITOR="1"
 
 # --- added by tools/beampilot_tui.py ---
-export BEAMPILOT_GPU_INDEX="0"
+# export BEAMPILOT_GPU_INDEX="1"   # blank = auto-detect a card the backend can drive
 # export SCALE=""
 export BEAMPILOT_LAUNCH_DELAY="0"

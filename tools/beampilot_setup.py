@@ -302,10 +302,17 @@ def check_gpu():
         print(f"  {WARN} NVIDIA {idx}: {name}, {mem} (compute {cap})"
               + " -- too old for tinygrad, needs >= 8.0 (Ampere)")
     if usable_nv is not None:
-      print(f"      {DIM}set USE_NV=1; config_beampilot.sh will select GPU {usable_nv}"
+      print(f"      {DIM}BEAMPILOT_BACKEND=nv; config_beampilot.sh will select GPU {usable_nv}"
             + f" via DEV=\":{usable_nv}+NV\"{RESET}")
     else:
-      print(f"  {FAIL} no NVIDIA GPU is new enough for tinygrad's NV backend")
+      # Not fatal any more. tinygrad's NV backend only implements the Ampere
+      # command classes, but NVIDIA's own stack has no such limit, so an older
+      # card is a backend choice rather than a dead end.
+      print(f"  {WARN} no NVIDIA GPU is new enough for tinygrad's NV backend"
+            + " (needs compute >= 8.0)")
+      print(f"      {DIM}use BEAMPILOT_BACKEND=cuda instead -- NVIDIA's own libcuda/nvrtc,"
+            + " works back to Maxwell and uses tensor cores. BEAMPILOT_BACKEND=cl (OpenCL)"
+            + f" also works, a little slower and with no tensor cores.{RESET}")
 
   rc, out, _ = run(["lspci"])
   if rc == 0:
@@ -319,11 +326,13 @@ def check_gpu():
     target = (ver // 10000, (ver // 100) % 100, ver % 100)
     arch = f"gfx{target[0]}{target[1]:x}{target[2]:x}"
     if target in ((9, 4, 2), (9, 5, 0)) or target[0] in (11, 12):
-      print(f"      {DIM}AMD {idx}: {arch} -- usable with USE_AMD=1"
+      print(f"      {DIM}AMD {idx}: {arch} -- usable with BEAMPILOT_BACKEND=amd"
             + f" (DEV=\":{idx}+AMD\"){RESET}")
     else:
       print(f"  {WARN} AMD {idx}: {arch} -- tinygrad's AMD backend does not support it"
             + " (needs gfx942, gfx950 or gfx11xx/gfx12xx)")
+      print(f"      {DIM}BEAMPILOT_BACKEND=cl (OpenCL) will drive it if Mesa's rusticl or"
+            + f" AMD's own ICD is installed.{RESET}")
 
   if not found:
     print(f"  {WARN} no discrete GPU detected -- the driving model will be very slow on CPU")

@@ -30,22 +30,47 @@ if arch == 'comma_arm64':
   tg_backend = 'QCOM'
   tg_flags = f'DEV={tg_backend} IMAGE=1 FLOAT16=1 NOLOCALS=1 JIT_BATCH_SIZE=0 OPENPILOT_HACKS=1'
 else:
-  # beampilot: pick WHICH physical GPU on a multi-GPU machine. tinygrad selects
-  # a device with the "NV:1" / "AMD:1" suffix (device.py splits on ":"); index 0
-  # is the default and canonicalises back to a bare "NV". This is a BUILD-time
-  # flag, so changing it requires a rebuild -- useful when the game should
-  # render on one card and the driving model run on another.
-  _gpu_idx = os.getenv('BEAMPILOT_GPU_INDEX', '0')
-  _dev_suffix = f':{_gpu_idx}' if _gpu_idx.isdigit() and _gpu_idx != '0' else ''
-  if os.getenv('USE_AMD') == '1':
-    tg_backend = 'AMD'
-    tg_flags = f'DEV=AMD{_dev_suffix}'
-  elif os.getenv('USE_NV') == '1':
-    tg_backend = 'NV'
-    tg_flags = f'DEV=NV{_dev_suffix}'
+  # beampilot: which tinygrad backend, and which physical GPU, the model is
+  # compiled for. Both are BUILD-time -- the .pkl holds programs compiled for
+  # one backend -- so changing either means re-running setup.
+  #
+  # config_beampilot.sh has already worked all of this out (it has to, for the
+  # runtime DEV), so prefer its answer over re-deriving it here: build and
+  # runtime disagreeing about which card the .pkl targets is a silent way to
+  # end up with a model that will not load.
+  # CUDA and CL take no device index in DEV at all; the card is chosen by hiding
+  # the others. Carried in the command string rather than left in os.environ,
+  # because SCons hands subprocesses env['ENV'], not the interpreter's
+  # environment, so an os.environ change here would not reach the compiler.
+  # PCI_BUS_ID because the default CUDA ordering is fastest-first -- the reverse
+  # of nvidia-smi's, which is what BEAMPILOT_GPU_INDEX means everywhere else.
+  def _visible(idx):
+    return f'CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES={idx} ' if idx else ''
+
+  tg_backend = os.getenv('BEAMPILOT_TG_BACKEND', '')
+  tg_dev = os.getenv('BEAMPILOT_TG_DEV', '')
+  if tg_backend and tg_dev:
+    tg_flags = _visible(os.getenv('CUDA_VISIBLE_DEVICES', '')) + f'DEV={tg_dev}'
   else:
-    tg_backend = 'CPU'
-    tg_flags = f'DEV=CPU' if arch == 'Darwin' else 'DEV=CPU:LLVM'
+    # Standalone build with nothing sourced. USE_NV/USE_AMD are the upstream
+    # spelling; BEAMPILOT_BACKEND is ours and wins.
+    _backend = (os.getenv('BEAMPILOT_BACKEND')
+                or ('amd' if os.getenv('USE_AMD') == '1' else 'nv' if os.getenv('USE_NV') == '1' else '')).lower()
+    tg_backend = {'nv': 'NV', 'amd': 'AMD', 'cuda': 'CUDA', 'cl': 'CL', 'opencl': 'CL'}.get(_backend, '')
+    _gpu_idx = os.getenv('BEAMPILOT_GPU_INDEX', '')
+    if tg_backend in ('NV', 'AMD') and _gpu_idx.isdigit():
+      # NV and AMD are HCQ backends: the index is a visibility filter and goes
+      # BEFORE the '+'. "DEV=NV:1" -- which is what this used to emit -- parses
+      # as renderer "1" (Target.parse in tinygrad/helpers.py) and opens GPU 0
+      # anyway, so a multi-GPU build was quietly compiled for the wrong card.
+      tg_flags = f'DEV=:{_gpu_idx}+{tg_backend}'
+    elif tg_backend in ('CUDA', 'CL') and _gpu_idx.isdigit():
+      tg_flags = _visible(_gpu_idx) + f'DEV={tg_backend}'
+    elif tg_backend:
+      tg_flags = f'DEV={tg_backend}'
+    else:
+      tg_backend = 'CPU'
+      tg_flags = 'DEV=CPU' if arch == 'Darwin' else 'DEV=CPU:LLVM'
 
 tg_devices = { # which device to put jit inputs to at runtime
   'openpilot.selfdrive.modeld.modeld': {

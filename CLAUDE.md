@@ -307,10 +307,19 @@ These were each a real bug that cost significant debugging time. Don't regress t
   this is easy to hit.
 - **tinygrad's NV/AMD backends are not CUDA/ROCm** — raw ioctls, Ampere-or-newer only (`NV`), or
   gfx942/gfx950/gfx11xx/gfx12xx (`AMD`). An older card doesn't run slowly, it dies at model load
-  with a bare `StopIteration` in `ops_nv.py:440`. On a mixed-GPU box tinygrad defaults to index 0,
-  which may be the unusable card. `config_beampilot.sh` detects the first usable one and sets
-  `DEV=":<index>+NV"` — index BEFORE the `+`. Detected, not hardcoded: PCI enumeration shifts when
-  cards move.
+  with a bare `StopIteration` in `ops_nv.py:441` (`next()` over `AMPERE_COMPUTE_B` etc. on a card
+  that exposes the Turing classes). It is NOT about tensor cores — a 2060 has them and fails the
+  same way. `BEAMPILOT_BACKEND=cuda` or `=cl` goes through the vendor stack and has no such limit.
+- **The device index reaches each backend differently, and the obvious spelling is silently
+  wrong.** `NV`/`AMD` are HCQ backends: the index is a visibility filter read from
+  `Target.indices`, so it goes BEFORE the `+` (`DEV=":1+NV"`). `DEV=NV:1` parses as renderer `"1"`
+  (`Target.parse`, `tinygrad/helpers.py`) and opens GPU 0 anyway — `modeld/SConscript` emitted
+  exactly that, so a multi-GPU BUILD targeted the wrong card while the runtime was correct.
+  `CUDA`/`CL` are not HCQ and take no index at all (`DEV=CL:1` → "CL has no renderer '1'"); the
+  card is chosen with `CUDA_VISIBLE_DEVICES`, which NVIDIA's OpenCL ICD honours too. Pair it with
+  `CUDA_DEVICE_ORDER=PCI_BUS_ID` or the numbering is fastest-first, the reverse of nvidia-smi's.
+  `config_beampilot.sh` works all of this out once and exports `BEAMPILOT_TG_BACKEND`/`_TG_DEV`
+  for the build, so build and runtime cannot disagree.
 - **openpilot's `Ratekeeper` never resyncs**, so one long frame makes it sleep zero until it has
   caught up — a 285 ms hiccup emits ~6 frames ~13 ms apart and modeld sees the world lurch then
   stall. `beamcamd` uses `FramePacer`, which drops a backlog it can no longer deliver on time.
@@ -324,15 +333,17 @@ These were each a real bug that cost significant debugging time. Don't regress t
 
 ## Environment notes
 
-- `config_beampilot.sh`: `USE_NV=1` (AMD iGPU compute needs the user in `render` group),
-  `CHESTNUT=0` (setting 1 forces `DEV=AMD` regardless of `USE_NV`), `BIG=1`
+- `config_beampilot.sh`: `BEAMPILOT_BACKEND=nv` (`nv` | `amd` | `cuda` | `cl`; `USE_NV`/`USE_AMD`
+  are the upstream spelling and only consulted when it is unset), `CHESTNUT=0` (setting 1 forces
+  `DEV=AMD` regardless of the backend — it is built for comma's USB eGPU), `BIG=1`
   (this is a *resolution* switch, not a UI scale knob — use `SCALE` for that).
 - `SKIP_FW_QUERY=1` + `FINGERPRINT=HONDA_CIVIC_2022` — the car identity is set here, not
   fingerprinted from CAN. Changing it requires matching `beamngd`/`beamcamd` updates.
 - **This machine has two NVIDIA cards**: a GTX 1660 SUPER (Turing, 7.5) at index 0 and the RTX
-  3060 (Ampere, 8.6) at index 1. Only the 3060 can run the model, so `DEV=:1+NV` — auto-detected,
-  and printed at launch as `[beampilot] tinygrad NV -> GPU 1`. The AMD iGPU is gfx1036, which
-  tinygrad does not support, so `USE_AMD=1` is not an option here.
+  3060 (Ampere, 8.6) at index 1, plus a gfx1036 AMD iGPU that tinygrad's `AMD` backend does not
+  support. `BEAMPILOT_BACKEND=nv` picks the 3060 automatically (`DEV=:1+NV`, printed at launch as
+  `[beampilot] tinygrad NV -> GPU 1`). The 1660 is only reachable through `cuda` or `cl`, and it
+  runs the standard model fine — 8.3 ms/frame against a 50 ms budget.
 - `BEAMPILOT_CAPTURE_BACKEND` = `auto` | `x11` | `portal`. The portal backend also works on X11
   and measures smoother there (50.00 ms mean / 51.28 max vs 49.96 / 66.81 over 300 frames, since
   the frame is already in memory rather than the loop blocking on the X server) and skips window

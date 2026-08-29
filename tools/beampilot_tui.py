@@ -80,24 +80,59 @@ def _as_float(raw: str | None, fallback: float) -> float:
     return fallback
 
 
-def gpu_options() -> list[str]:
-  """Detected first, so the list reflects what this machine can actually use."""
-  opts = []
-  if shutil.which("nvidia-smi"):
-    try:
-      out = subprocess.run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
-                           capture_output=True, text=True, timeout=5)
-      if out.returncode == 0 and out.stdout.strip():
-        opts.append("nvidia")
-    except (subprocess.SubprocessError, OSError):
-      pass
+def nvidia_compute_caps() -> list[tuple[str, float]]:
+  """[(index, compute capability)] in nvidia-smi order."""
+  caps = []
+  if not shutil.which("nvidia-smi"):
+    return caps
   try:
-    lspci = subprocess.run(["lspci"], capture_output=True, text=True, timeout=5)
-    if lspci.returncode == 0 and re.search(r"VGA.*\b(AMD|ATI|Radeon)\b", lspci.stdout, re.I):
-      opts.append("amd")
+    out = subprocess.run(["nvidia-smi", "--query-gpu=index,compute_cap", "--format=csv,noheader"],
+                         capture_output=True, text=True, timeout=5)
+    if out.returncode == 0:
+      for line in out.stdout.strip().splitlines():
+        idx, _, cap = line.partition(",")
+        try:
+          caps.append((idx.strip(), float(cap)))
+        except ValueError:
+          continue
   except (subprocess.SubprocessError, OSError):
     pass
-  return opts or ["nvidia", "amd"]
+  return caps
+
+
+def gpu_options() -> list[str]:
+  """Detected first, so the list reflects what this machine can actually use.
+
+  Four tinygrad backends, and the difference between them is not speed, it is
+  which cards they will open at all:
+
+    nv    tinygrad's own NVIDIA driver, raw ioctls. Ampere or newer ONLY -- it
+          implements the Ampere command classes and nothing older, so a Turing
+          card dies at model load with a bare StopIteration.
+    amd   the same for AMD: gfx942, gfx950, gfx11xx, gfx12xx.
+    cuda  NVIDIA's own libcuda/nvrtc. Every NVIDIA card back to Maxwell,
+          tensor cores included. The right answer for a pre-Ampere card.
+    cl    OpenCL. Anything with an ICD, any vendor. No tensor core support in
+          tinygrad, which costs little on the small model and a lot on chestnut.
+  """
+  caps = nvidia_compute_caps()
+  opts = []
+  if caps:
+    if any(c >= 8.0 for _, c in caps):
+      opts.append("nvidia")
+  amd = False
+  try:
+    lspci = subprocess.run(["lspci"], capture_output=True, text=True, timeout=5)
+    amd = lspci.returncode == 0 and bool(re.search(r"VGA.*\b(AMD|ATI|Radeon)\b", lspci.stdout, re.I))
+  except (subprocess.SubprocessError, OSError):
+    pass
+  if amd:
+    opts.append("amd")
+  if caps:
+    opts.append("cuda")
+  if caps or amd or os.path.isdir("/etc/OpenCL/vendors"):
+    opts.append("opencl")
+  return opts or ["nvidia", "amd", "cuda", "opencl"]
 
 
 def gpu_list() -> list[str]:
@@ -132,15 +167,28 @@ def build_sections() -> list[Section]:
   gpus = gpu_options()
   devices = gpu_list()
   device_choices = [str(i) for i in range(max(len(devices), 1))]
+  caps = dict(nvidia_compute_caps())
   device_help = ("Which physical GPU runs the model, if you have more than one: "
-                 + (", ".join(f"[{i}] {n}" for i, n in enumerate(devices)) if devices else "none detected")
-                 + ". BUILD-time -- re-run setup after changing.")
+                 + (", ".join(f"[{i}] {n}" + (f" (compute {caps[str(i)]:g})" if str(i) in caps else "")
+                              for i, n in enumerate(devices)) if devices else "none detected")
+                 + ". Same numbering as nvidia-smi for every backend. Blank auto-detects the"
+                 + " first card the chosen backend can actually drive."
+                 + " BUILD-time -- re-run setup after changing.")
   return [
     Section("Hardware", "What this machine has, and which model to run.", [
       Setting("BEAMPILOT_GPU", "GPU backend",
-              "Which GPU runs the driving model. It shares the card with BeamNG's rendering.",
-              gpus[0], choices=gpus),
-      Setting("BEAMPILOT_GPU_INDEX", "GPU device", device_help, "0", choices=device_choices,
+              "Which tinygrad backend runs the driving model. nvidia and amd are tinygrad's own"
+              + " drivers -- fastest, but nvidia needs compute 8.0 (Ampere) or newer and amd needs"
+              + " gfx11xx/gfx12xx/gfx942/gfx950; an older card does not run slowly, it dies at"
+              + " model load. cuda is the compatibility option for a pre-Ampere NVIDIA card"
+              + " (works back to Maxwell, tensor cores and all). opencl is the widest net, any"
+              + " vendor, but tinygrad's OpenCL has no tensor cores -- fine for the standard"
+              + " model, costly for chestnut. Only backends this machine can use are offered."
+              + " BUILD-time -- re-run setup after changing.",
+              gpus[0], choices=gpus,
+              warn="build-time setting -- rebuild for this to take effect"),
+      Setting("BEAMPILOT_GPU_INDEX", "GPU device", device_help, "", choices=[""] + device_choices,
+              value_labels={"": "auto"},
               warn="build-time setting -- rebuild for this to take effect"),
       Setting("CHESTNUT", "Chestnut model",
               "Larger, better-driving model. Needs 8GB+ VRAM (standard needs 4GB).",
@@ -380,6 +428,18 @@ def build_sections() -> list[Section]:
   ]
 
 
+# A settings line is `export KEY=value` at column 0 and nothing else on it.
+#
+# The indentation matters. config_beampilot.sh is a shell script as well as a
+# settings file, and the backend-selection block it ends with is full of lines
+# like `export USE_AMD=1; unset USE_NV` and `export DEV=":${IDX}+NV"`. Matching
+# those as settings meant reading a value of `1; unset USE_AMD` -- and, on the
+# next save, REWRITING the branch as `export USE_AMD=""` and destroying the
+# logic. Every real setting in the file sits at column 0; every line of shell
+# is inside a block and indented.
+SETTING_LINE = re.compile(r'^export\s+([A-Z_][A-Z0-9_]*)=([^;]*)$')
+
+
 def read_config() -> dict[str, str]:
   """Parse `export KEY="value"` lines. Commented-out lines are treated as unset."""
   values: dict[str, str] = {}
@@ -387,7 +447,7 @@ def read_config() -> dict[str, str]:
     return values
   with open(CONFIG) as f:
     for line in f:
-      m = re.match(r'^\s*export\s+([A-Z_][A-Z0-9_]*)=(.*)$', line)
+      m = SETTING_LINE.match(line.rstrip("\n"))
       if not m:
         continue
       key, raw = m.group(1), m.group(2).strip()
@@ -414,6 +474,7 @@ NEVER_PRUNE = {
   "BEAMPILOT_CAM_REGION", "BEAMPILOT_CAPTURE_BACKEND", "BEAMPILOT_CALIBRATION",
   "BEAMPILOT_IGNORE_COMM_ISSUE", "BEAMPILOT_PERSONALITY", "BEAMPILOT_LAUNCH_DELAY",
   "BIG", "SCALE", "CHESTNUT", "FINGERPRINT", "BLOCK", "USE_NV", "USE_AMD",
+  "BEAMPILOT_BACKEND",
 }
 
 
@@ -446,14 +507,14 @@ def write_config(values: dict[str, str], defaults: dict[str, str] | None = None)
       in_tui_block = True
       out.append(line)
       continue
-    m = re.match(r'^(\s*)export\s+([A-Z_][A-Z0-9_]*)=(.*)$', line)
+    m = SETTING_LINE.match(line.rstrip("\n"))
     if not m:
       # a non-blank, non-export line ends an appended block
       if line.strip() and not line.strip().startswith("#"):
         in_tui_block = False
       out.append(line)
       continue
-    indent, key, rest = m.group(1), m.group(2), m.group(3)
+    indent, key, rest = "", m.group(1), m.group(2)
     if key not in values:
       out.append(line)
       continue
@@ -501,7 +562,7 @@ def _drop_empty_blocks(lines: list[str]) -> list[str]:
       for nxt in rest:
         if nxt.strip().startswith(TUI_BLOCK_MARKER):
           break
-        if re.match(r'^\s*export\s', nxt):
+        if nxt.startswith("export "):
           has_export = True
           break
         if nxt.strip() and not nxt.strip().startswith("#"):
@@ -515,6 +576,13 @@ def _drop_empty_blocks(lines: list[str]) -> list[str]:
 
 
 ON_OFF = ("0", "1")
+
+# What the screen calls a backend, and what config_beampilot.sh and the build
+# call it. Kept apart because "nvidia" and "amd" are the names people use for
+# cards, while nv/amd/cuda/cl are tinygrad's backends -- and two of the four
+# NVIDIA options are both "nvidia" to a person.
+CHOICE_TO_BACKEND = {"nvidia": "nv", "amd": "amd", "cuda": "cuda", "opencl": "cl"}
+BACKEND_TO_CHOICE = {v: k for k, v in CHOICE_TO_BACKEND.items()} | {"opencl": "opencl", "nv": "nvidia"}
 
 
 def _fit(text: str, width: int) -> str:
@@ -564,7 +632,13 @@ class Tui:
     for sec in self.sections:
       for s in sec.settings:
         if s.key == "BEAMPILOT_GPU":
-          if on_disk.get("USE_NV") == "1":
+          # BEAMPILOT_BACKEND is the real setting; USE_NV/USE_AMD are the
+          # upstream spelling and only consulted when it is absent, so a config
+          # written before this existed still reads correctly.
+          backend = (on_disk.get("BEAMPILOT_BACKEND") or "").strip().lower()
+          if backend in BACKEND_TO_CHOICE:
+            values[s.key] = BACKEND_TO_CHOICE[backend]
+          elif on_disk.get("USE_NV") == "1":
             values[s.key] = "nvidia"
           elif on_disk.get("USE_AMD") == "1":
             values[s.key] = "amd"
@@ -715,8 +789,13 @@ class Tui:
   def save(self):
     to_write = dict(self.values)
     gpu = to_write.pop("BEAMPILOT_GPU", "nvidia")
-    to_write["USE_NV"] = "1" if gpu == "nvidia" else ""
+    to_write["BEAMPILOT_BACKEND"] = CHOICE_TO_BACKEND.get(gpu, "nv")
+    # Kept in step because setup and the openpilot build still read them, and a
+    # stale pair contradicting BEAMPILOT_BACKEND is a confusing way to end up
+    # building for the wrong card. cuda and cl are NVIDIA-or-anything, so they
+    # ride under USE_NV.
     to_write["USE_AMD"] = "1" if gpu == "amd" else ""
+    to_write["USE_NV"] = "" if gpu == "amd" else "1"
     try:
       write_config(to_write, self.defaults)
       self.dirty = False
