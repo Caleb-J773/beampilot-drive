@@ -11,6 +11,7 @@ from dataclasses import dataclass
 import evdev
 from evdev import ecodes
 
+from opendbc.car import scale_tire_stiffness
 from opendbc.car.honda.values import CruiseButtons
 from openpilot.common.beampilot_limits import ACCEL_MAX as ACCEL_MAX_SCALED
 from openpilot.common.beampilot_limits import ACCEL_MIN as ACCEL_MIN_SCALED
@@ -19,6 +20,9 @@ from openpilot.common.beampilot_bsm import (BSM_ENABLED, BlindSpotSender,
                                             flags_from_dash_lights, resolve)
 from openpilot.common.beampilot_bsm import lua_config as bsm_lua_config
 from openpilot.common.beampilot_radar import lua_config as radar_lua_config
+from openpilot.common.beampilot_vehicle import VehicleGeometryReceiver
+from openpilot.common.beampilot_vehicle import lua_config as vehicle_lua_config
+from openpilot.common.beampilot_vehicle import resolve as resolve_geometry
 from openpilot.common.constants import CV
 from opendbc.car.structs import car
 from opendbc.car.vehicle_model import VehicleModel
@@ -77,6 +81,10 @@ if CONTROL_MODE not in ("lua", "joystick"):
 # in tools/beampilot_monitor.py, then set BEAMPILOT_STEER_LOCK_DEG to match.
 # Too low makes openpilot oversteer, too high makes it run wide.
 MAX_STEERING_WHEEL_ANGLE_DEG = env_float("BEAMPILOT_STEER_LOCK_DEG", 510.0)
+# ...unless it was left unset, in which case the mod's measurement of the real
+# vehicle replaces it. Explicitly setting it is a human decision and still
+# wins -- see BeamNGBridge.apply_geometry.
+STEER_LOCK_PINNED = bool(os.environ.get("BEAMPILOT_STEER_LOCK_DEG", "").strip())
 
 BEAMNGD_TICK_HZ = env_float("BEAMPILOT_TICK_HZ", 100.0)
 # actuators.torque has to become a steering *position* for BeamNG's
@@ -144,40 +152,41 @@ LANE_CHANGE_ABORT_WINDOW = env_float("BEAMPILOT_LANE_CHANGE_ABORT_S", 2.0)
 REPORT_GEAR = env_bool("BEAMPILOT_REPORT_GEAR", True)
 
 
-# The one place the fake Honda's identity still reaches the driving: beamngd
-# turns openpilot's desiredCurvature into a wheel angle with the CIVIC's
-# geometry, because that is what CarParams says. Nothing anywhere closes a loop
-# on the result -- the model does eventually notice the car is off its path, but
-# there is no controller integrating the error -- so if the BeamNG vehicle needs
-# more lock for the same curvature, it simply under-turns forever.
+# Where the fake Honda's identity used to reach the driving: beamngd turns
+# openpilot's desiredCurvature into a wheel angle with whatever geometry
+# CarParams carries, and nothing anywhere closes a loop on the result -- the
+# model does eventually notice the car is off its path, but no controller
+# integrates the error -- so a vehicle that needs more lock for the same
+# curvature simply under-turns forever. steerRatio dominates: the wheel angle
+# scales with it almost exactly.
 #
-# steerRatio dominates: wheel angle scales with it almost exactly. Measure it
-# rather than guess -- tools/beampilot_monitor.py compares the curvature
-# commanded against the curvature achieved (yaw rate / speed) and prints the
-# ratio a steady corner implies. Unset means the car's own CarParams value,
-# which is stock behaviour.
-_GEOMETRY_FIELDS = {
-  "steerRatio": "BEAMPILOT_STEER_RATIO",        # Civic 15.38; the binding one
-  "wheelbase": "BEAMPILOT_WHEELBASE_M",         # Civic 2.70
-  "centerToFront": "BEAMPILOT_CENTER_TO_FRONT_M",  # Civic 1.08
-  "mass": "BEAMPILOT_MASS_KG",                  # Civic 1462
-}
+# Two things now fix that, in order of preference.
+#
+# paramsd estimates steerRatio and tyre stiffness from how the car actually
+# responds, and openpilot feeds that back into its own VehicleModel every tick.
+# Following it is almost always right here, because the starting point is a
+# Honda's and the car is not a Honda. Off restores the pre-fix behaviour, which
+# is the static CarParams value forever.
+USE_LIVE_STEER_PARAMS = env_bool("BEAMPILOT_LIVE_STEER_PARAMS", True)
 
-
-def vehicle_geometry_overrides() -> dict[str, float]:
-  """Only the fields actually set, so an unset environment changes nothing."""
-  out = {}
-  for field, var in _GEOMETRY_FIELDS.items():
-    raw = os.environ.get(var, "").strip()
-    if not raw:
-      continue
-    try:
-      value = float(raw)
-    except ValueError:
-      continue
-    if value > 0:
-      out[field] = value
-  return out
+# Better still: stop inferring, and MEASURE. The mod reads the vehicle BeamNG
+# actually spawned -- wheelbase, weight distribution, mass, yaw inertia, the
+# steering lock -- straight out of its node table, and fits the rack ratio from
+# the real steering wheel angle against the real road wheel angle.
+# openpilot/common/beampilot_vehicle.py is that feed; resolve_geometry() merges
+# it with the manual BEAMPILOT_* overrides, which win over both.
+#
+# Where the two overlap -- steerRatio -- the measurement wins: paramsd infers it
+# through a model of the wrong car, and clamps the answer to 0.5x..2.0x a
+# Honda's, which is not a bound that means anything for a bus. Its tyre
+# stiffness estimate is still followed, since that genuinely cannot be measured
+# off the geometry.
+#
+# The old path is intact and one switch away: BEAMPILOT_BEAMNG_GEOMETRY=0, an
+# un-reinstalled mod, or simply no packets arriving all leave CarParams exactly
+# as the fingerprint built it -- a Honda Civic, which is what beampilot drove on
+# before any of this existed. The FINGERPRINT itself is untouched either way;
+# this only ever changes those few geometry numbers.
 
 
 def gear_for(gear_index: int, report: bool | None = None) -> str:
@@ -356,16 +365,22 @@ class BeamNGBridge:
     self.sim_sensors = SimulatedSensors(create_camera=False)  # beamcamd.py owns the camera pipeline
     self.state = SimulatorState()
 
-    # HONDA_CIVIC_2022 (non-alpha-long) has pcmCruise=True: opendbc's honda
-    # carstate.py sets cruiseState.enabled straight from the ACC_STATUS CAN
-    # signal, and openpilot only decides to actually engage *after* seeing
-    # that go true -- it expects the car's own ACC to turn on by itself,
-    # exactly like a real Honda's cruise button does independent of whatever
-    # software is watching. So ACC_STATUS (state.is_engaged, sent via
-    # SimulatedCar) has to be driven directly from the cruise button here, NOT
-    # from selfdriveState.active -- otherwise nothing is ever the first thing
-    # to flip cruiseState.enabled true, and openpilot can never engage no
-    # matter how many times the button is pressed.
+    # openpilot only decides to actually engage *after* seeing the car's own
+    # cruise report go true: opendbc's honda carstate.py sets
+    # cruiseState.enabled straight from the ACC_STATUS CAN signal, and
+    # openpilot expects the car's ACC to turn on by itself, exactly like a real
+    # Honda's cruise button does independent of whatever software is watching.
+    # So ACC_STATUS (state.is_engaged, sent via SimulatedCar) has to be driven
+    # directly from the cruise button here, NOT from selfdriveState.active --
+    # otherwise nothing is ever the first thing to flip cruiseState.enabled
+    # true, and openpilot can never engage no matter how many times the button
+    # is pressed.
+    #
+    # This used to be explained as following from pcmCruise=True on a
+    # non-alpha-long Civic. It does not: launch_beampilot.sh sets
+    # AlphaLongitudinalEnabled, so pcmCruise has always been False in practice
+    # -- on the Civic and on BEAMPILOT alike. The button still has to be what
+    # starts it either way.
     self.acc_engaged = False
 
     # cruiseState.speed (see SimulatedCar.send_can_messages's CRUISE_SPEED_PCM)
@@ -384,6 +399,13 @@ class BeamNGBridge:
     # Kept in BeamNG's own steering_input sign convention throughout
     # (confirmed empirically: left == -1.0).
     self.steering_position = 0.0
+    self.static_steer_ratio = 0.0
+    self.live_params_applied = False
+    # The divisor that turns a steering wheel angle into BeamNG's -1..1 input.
+    # Starts at the configured/default guess and is replaced by the vehicle's
+    # real lock once the mod reports it (unless it was pinned by hand).
+    self.steer_lock_deg = MAX_STEERING_WHEEL_ANGLE_DEG
+    self.steer_lock_warned = False
 
     # Mirrors the Lua mod's own isControlling gating: only push a neutral
     # reset on the disengage EDGE, never on every not-engaged tick -- emitting
@@ -415,6 +437,16 @@ class BeamNGBridge:
     # and not another.
     self.params = Params()
     self.vehicle_model: VehicleModel | None = None
+    self.car_params_bytes: bytes | None = None
+
+    # What the mod measured about the vehicle actually spawned. None if the
+    # feed is switched off or its port is taken, which is not an error: the
+    # VehicleModel then stays on CarParams exactly as it always did.
+    self.geometry = VehicleGeometryReceiver.create()
+    self.geometry_applied: dict[str, float] = {}
+    if self.geometry is None:
+      print("[beamngd] BeamNG vehicle geometry off -- steering uses the"
+            + " fingerprinted Civic's numbers", flush=True)
 
     # Rates SERVICE_LIST expects, held by a phase clock rather than a
     # `now - last > interval` gate -- see PhaseClock for why that undershoots.
@@ -583,6 +615,88 @@ class BeamNGBridge:
   def bsm_config_due(self) -> bool:
     return self.tick_count % BSM_CONFIG_INTERVAL_TICKS == 0
 
+  def apply_geometry(self):
+    """Take on what the mod measured about the vehicle BeamNG actually spawned.
+
+    Two separate consumers, because they are two separate errors:
+      - the CarParams fields feed VehicleModel, which decides how much ROAD
+        WHEEL angle a given curvature needs;
+      - the steering lock is beamngd's own divisor, turning that road wheel
+        angle into the -1..1 number BeamNG's input.event takes.
+    Get one right and the other wrong and the result is still a constant
+    scaling error on every steering command, which is exactly the symptom this
+    is here to remove.
+    """
+    values = resolve_geometry(self.geometry.values)
+    if values != self.geometry_applied:
+      self.geometry_applied = values
+      self.refresh_vehicle_model(force=True)
+
+    lock = self.geometry.values.get("steerLockDeg")
+    if lock and not STEER_LOCK_PINNED and abs(lock - self.steer_lock_deg) > 0.5:
+      print(f"[beamngd] steering lock {self.steer_lock_deg:.0f} -> {lock:.0f} deg"
+            + f" (measured on {self.geometry.name or 'the spawned vehicle'})", flush=True)
+      self.steer_lock_deg = lock
+    elif lock and STEER_LOCK_PINNED and abs(lock - self.steer_lock_deg) > 0.1 * lock:
+      # Pinned by hand and more than 10% off what the car actually has. Not
+      # overridden -- an explicit setting is an explicit setting -- but said
+      # out loud once, because it silently scales every steering command.
+      if not self.steer_lock_warned:
+        self.steer_lock_warned = True
+        print("[beamngd] WARNING: BEAMPILOT_STEER_LOCK_DEG is pinned to"
+              + f" {self.steer_lock_deg:.0f} but this vehicle's lock is {lock:.0f} deg."
+              + " Unset it to use the measured value.", flush=True)
+
+  def refresh_vehicle_model(self, force: bool = False):
+    """(Re)build the VehicleModel from CarParams plus any measured geometry.
+
+    Cheap on the common path: once a model exists and nothing has changed this
+    is a single attribute test. Rebuilding rather than mutating because
+    VehicleModel copies the CarParams floats it needs into its own attributes
+    at construction time -- there is no setter for wheelbase.
+
+    CarParams comes from the persistent Params store (written by card.py with
+    block=True) rather than a cereal subscription: carParams is published once,
+    right after fingerprinting, and a plain SubMaster can miss it entirely if
+    beamngd's socket was not connected at that exact moment -- a classic
+    slow-joiner race, and one whose symptom is the steering command staying at
+    zero forever.
+    """
+    if self.vehicle_model is not None and not force:
+      return
+    if self.car_params_bytes is None:
+      self.car_params_bytes = self.params.get("CarParams")
+      if self.car_params_bytes is None:
+        return
+
+    with car.CarParams.from_bytes(self.car_params_bytes) as CP:
+      builder = CP.as_builder()
+      for field, value in self.geometry_applied.items():
+        setattr(builder, field, value)
+      # Tyre stiffness is not independent of the geometry: opendbc derives it
+      # from mass and weight distribution (scale_tire_stiffness, called by
+      # every CarInterface), so overriding those and leaving the Civic's
+      # stiffness behind describes a car that cannot exist -- and it is the
+      # cF/cR ratio that sets how much EXTRA lock the model asks for as speed
+      # rises. Back the fingerprint's own tire_stiffness_factor out of the
+      # numbers it published, then re-derive at the real geometry.
+      if {"mass", "wheelbase", "centerToFront"} & set(self.geometry_applied):
+        base_front, _ = scale_tire_stiffness(CP.mass, CP.wheelbase, CP.centerToFront, 1.0)
+        factor = CP.tireStiffnessFront / base_front if base_front > 0 else 1.0
+        builder.tireStiffnessFront, builder.tireStiffnessRear = scale_tire_stiffness(
+          builder.mass, builder.wheelbase, builder.centerToFront, factor)
+      self.static_steer_ratio = builder.steerRatio
+      self.vehicle_model = VehicleModel(builder)
+      summary = (f"steerRatio={builder.steerRatio:.2f} wheelbase={builder.wheelbase:.2f}m"
+                 + f" centerToFront={builder.centerToFront:.2f}m mass={builder.mass:.0f}kg"
+                 + f" J={builder.rotationalInertia:.0f}")
+    source = self.geometry.name if (self.geometry is not None and self.geometry.name) else None
+    if self.geometry_applied:
+      print(f"[beamngd] VehicleModel for {source or 'the spawned vehicle'}: {summary}",
+            flush=True)
+    else:
+      print(f"[beamngd] VehicleModel from the fingerprinted CarParams: {summary}", flush=True)
+
   def send_control(self):
     actuators = self.sm['carControl'].actuators
     # actuators.torque (and carOutput.actuatorsOutput.torque, the version rate-
@@ -601,22 +715,7 @@ class BeamNGBridge:
     # controlsState.steeringAngleDesiredDeg).
     desired_curvature = self.sm['controlsState'].desiredCurvature
 
-    if self.vehicle_model is None:
-      cp_bytes = self.params.get("CarParams")
-      if cp_bytes is not None:
-        with car.CarParams.from_bytes(cp_bytes) as CP:
-          # VehicleModel.__init__ copies out plain floats it needs (mass,
-          # wheelbase, etc.) into its own attributes, so the resulting object
-          # remains valid after this `with` block exits -- and so overriding
-          # them has to happen BEFORE it is constructed.
-          builder = CP.as_builder()
-          for field, value in vehicle_geometry_overrides().items():
-            setattr(builder, field, value)
-          self.vehicle_model = VehicleModel(builder)
-        print("[beamngd] CarParams loaded, VehicleModel ready for steering"
-              + (f" (overrides: {vehicle_geometry_overrides()})"
-                 if vehicle_geometry_overrides() else ""), flush=True)
-
+    self.refresh_vehicle_model()
     if self.vehicle_model is not None:
       # get_steer_from_curvature() is opendbc's own inverse of calc_curvature(),
       # including the speed-dependent understeer compensation (curvature_factor)
@@ -630,7 +729,38 @@ class BeamNGBridge:
       # its sign convention is motionSim's, not paramsd's, and a roll fed in
       # backwards is worse than no roll at all -- matching the rest of the
       # stack is worth more here than the extra accuracy.
-      roll = self.sm['vehicleParameters'].roll
+      lp = self.sm['vehicleParameters']
+      roll = lp.roll
+      # Track paramsd's LIVE estimate, exactly as controlsd.py:80 does for its
+      # own VehicleModel. This was the one place beampilot silently diverged
+      # from stock: openpilot estimates steerRatio and tyre stiffness from the
+      # car's actual response and feeds them back, but beamngd built a separate
+      # VehicleModel from CarParams and never updated it -- so the conversion
+      # that actually reaches BeamNG stayed frozen at the fake Civic's 15.38
+      # while openpilot's own copy was being corrected. Since nothing else
+      # closes a loop on beamngd's output, that error had nowhere to go: the
+      # car just under-turned forever.
+      #
+      # Gated on validity. paramsd clamps its estimate to 0.5x..2.0x the
+      # CarParams value and flags it invalid outside that, and an unconverged
+      # or out-of-range estimate is worse than the static number.
+      #
+      # A ratio MEASURED from the vehicle's own steering geometry beats an
+      # inferred one, so when the mod has sent one it is pinned and only the
+      # tyre stiffness is followed. paramsd infers steerRatio from yaw rate
+      # against steering angle, which also absorbs every other error in the
+      # model it is inferring through -- and it is clamped to 0.5x..2.0x a
+      # Honda's, which is not a bound that means anything for a bus.
+      if USE_LIVE_STEER_PARAMS and lp.steerRatioValid and lp.stiffnessFactorValid:
+        measured = self.geometry_applied.get("steerRatio")
+        self.vehicle_model.update_params(max(lp.stiffnessFactor, 0.1),
+                                         measured or max(lp.steerRatio, 0.1))
+        self.live_params_applied = True
+      elif self.live_params_applied:
+        # Fall back rather than keep driving on a stale estimate that has since
+        # gone out of range.
+        self.vehicle_model.update_params(1.0, self.static_steer_ratio)
+        self.live_params_applied = False
       target_wheel_angle_rad = self.vehicle_model.get_steer_from_curvature(desired_curvature, self.state.speed, roll)
       target_wheel_angle_deg = math.degrees(target_wheel_angle_rad)
       # NOTE: sign flipped from the expected "openpilot left-positive, negate
@@ -638,7 +768,7 @@ class BeamNGBridge:
       # testing (curvature_factor/slip_factor confirmed NOT the cause: Honda's
       # real specs give a normal negative/understeer slip factor with no sign
       # flip at any real speed), so empirically this one needs the opposite.
-      target_position = target_wheel_angle_deg / MAX_STEERING_WHEEL_ANGLE_DEG
+      target_position = target_wheel_angle_deg / self.steer_lock_deg
       target_position = max(-1.0, min(1.0, target_position))
     else:
       target_position = self.steering_position  # no carParams yet -- hold still
@@ -702,6 +832,7 @@ class BeamNGBridge:
     if self.bsm_config_due():
       payload["bsm"] = bsm_lua_config()
       payload["radar"] = radar_lua_config()
+      payload["vehicle"] = vehicle_lua_config()
     if self.signal_cancel_ticks > 0:
       payload["cancelSignal"] = self.signal_cancel_side
       self.signal_cancel_ticks -= 1
@@ -751,6 +882,9 @@ class BeamNGBridge:
 
   def tick(self):
     self.sm.update(0)
+
+    if self.geometry is not None and self.geometry.update():
+      self.apply_geometry()
 
     telemetry = self.read_latest_telemetry()
     if telemetry is not None:

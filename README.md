@@ -461,13 +461,119 @@ tell rather than guess. If it's not binding and the car still runs wide, the cau
 | Setting | Default | |
 |---|---|---|
 | `BEAMPILOT_REPORT_GEAR` | `1` | Report the real gear. `0` pins it to drive so openpilot will engage in reverse (arcade mode). |
-| `BEAMPILOT_STEER_LOCK_DEG` | `510` | Your BeamNG car's steering lock. **Per-vehicle.** |
+| `BEAMPILOT_BEAMNG_GEOMETRY` | `1` | Measure the spawned vehicle and steer *that* instead of a Civic. See below. `0` restores the old behaviour exactly. |
+| `BEAMPILOT_LIVE_STEER_PARAMS` | `1` | Follow `paramsd`'s live steering-ratio / tyre-stiffness estimate, as stock openpilot does for its own copy of the model. |
+| `BEAMPILOT_STEER_LOCK_DEG` | `510` | Steering lock, centre to full lock. Measured per-vehicle when unset; `510` is only the fallback for when nothing reports one. |
 | `BEAMPILOT_CALIBRATION` | `instant` | `instant` starts already calibrated at a level pose. `live` converges from real driving first, and won't engage until it has. |
 | `BEAMPILOT_STEER_SWEEP_SECONDS` | `0.15` | Lock-to-lock sweep time. Lower is snappier and twitchier. |
-| `FINGERPRINT` | `HONDA_CIVIC_2022` | The car openpilot thinks it's driving. |
+| `FINGERPRINT` | `BEAMPILOT` | The car openpilot thinks it's driving. `HONDA_CIVIC_2022` is the old behaviour and still works. |
+
+#### The `BEAMPILOT` platform
+
+openpilot has to be told what car it is, and for a long time beampilot said
+`HONDA_CIVIC_2022`. That was never a lie about the CAN -- `beamngd` really does hand-pack
+Honda Bosch radarless frames -- but it was a lie about everything else, and a Civic's steering
+rack, weight distribution, engagement speeds and lateral tuning all came along with the name.
+
+`BEAMPILOT` is a real opendbc platform (`opendbc_repo/opendbc/car/beampilot/`) with the same
+wire format and none of the Honda:
+
+| | `HONDA_CIVIC_2022` | `BEAMPILOT` |
+|---|---|---|
+| CAN layout | Honda Bosch radarless | **the same** -- `beamngd` is unchanged |
+| `CarState` / `CarController` | Honda's | **the same objects**, reused rather than forked |
+| Geometry | a Civic's, permanently | a placeholder, replaced by the mod's measurement |
+| Engage / steer floor | a real EPS and ACC's | none -- nothing here quits at walking pace |
+| Longitudinal | behind the alpha-long gate | always on; there is no AEB to give up |
+| `transmissionType` | sniffed off the bus | stated: `beamngd` always sends `GEARBOX_AUTO` |
+
+Every engagement-critical `CarParams` field is identical between the two, and the same CAN
+decodes to the same `carState`. It is an honest name, not new behaviour.
+
+> [!NOTE]
+> `HONDA_CIVIC_2022` remains fully supported -- set it and nothing else changes. Both run
+> through the same `beamngd`, and the geometry measurement below applies to either.
+
+**Where it lives.** opendbc is a git submodule pointing at `commaai/opendbc`, which we cannot push
+to -- so the platform lives in *this* repo, at `tools/opendbc_beampilot_car/`, and is installed
+into the submodule by `tools/install_beampilot_car.py`. Same trade the BeamNG mods make: source of
+truth in the repo, symlinked into the place that has to see it.
+
+That script runs from `setup_beampilot.sh`, and again (silently) from `launch_beampilot.sh`. The
+second run matters: registering the platform takes two small edits to comma.ai's own files, and a
+`git submodule update` reverts them without saying anything. If it ever cannot install,
+`launch_beampilot.sh` falls back to `HONDA_CIVIC_2022` rather than failing to start.
+
+```bash
+uv run python tools/install_beampilot_car.py --check   # report without changing anything
+uv run python tools/install_beampilot_car.py           # install or repair
+```
+
+`git status` will show the `opendbc_repo` submodule as modified from then on. That is the install,
+and it is deliberate -- the parent repo records no new submodule commit, so a fresh
+`git clone --recursive` still gets comma.ai's opendbc untouched and installs on top.
+
+#### Driving the car BeamNG actually spawned
+
+The platform above fixes the car's *identity*. This fixes its *numbers* — and it applies whichever
+fingerprint you run. Almost none of the identity matters: the CAN parsing, the button layout and
+the safety model are all beampilot's own code underneath. What *does* matter is the handful of
+numbers openpilot uses to turn a desired **path** into a steering command:
+
+```
+desiredCurvature ──[wheelbase, centreToFront, mass, yaw inertia]──> road wheel angle
+                 ──[steering ratio]──> steering wheel angle
+                 ──[steering lock]──> BeamNG's −1…1 input
+```
+
+Every one of those was a Civic's, and `beamngd`'s conversion is **open loop** — nothing anywhere
+integrates the error between the curvature asked for and the curvature achieved. So a vehicle that
+needs more lock for the same corner simply under-turns forever. That is the usual reason a ramp is
+taken too wide *when raising `BEAMPILOT_MAX_LAT_ACCEL` changed nothing*: the lateral accel cap was
+never what was binding.
+
+The mod now measures all of it from the spawned vehicle and sends it over UDP 49156:
+
+| Measured | How |
+|---|---|
+| `wheelbase`, `centerToFront`, `trackWidth` | Wheel and node positions, projected onto axes built from the jbeam's reference nodes — the same construction BeamNG's own ESC controller uses |
+| `mass`, `rotationalInertia` | A mass-weighted integral over every node. openpilot's own yaw inertia is extrapolated from a Civic's mass and wheelbase; this is the real one |
+| `steerLockDeg` | `v.data.input.steeringWheelLock`, straight out of the jbeam |
+| `steerRatio` | **Measured while you drive**: the real steering wheel angle fitted against the real road wheel angle (`obj:nodeVecPlanarCosRightForward`, averaged across both front wheels so Ackermann and toe-in cancel) |
+
+The steer ratio needs the wheel actually turned to be measurable, so it stays unreported until you
+have steered a real amount — 20° at the wheel by default. **Turning lock to lock once before
+engaging measures it instantly.** Until then, the Civic's ratio is used, exactly as before.
+
+Tyre stiffness is re-derived at the new geometry rather than left at the Civic's: opendbc computes
+it from mass and weight distribution (`scale_tire_stiffness`), and it is the front/rear stiffness
+*ratio* that sets how much extra lock the model asks for as speed rises.
+
+Any of these wins over the measurement if you set it, for pinning a number you don't trust:
+`BEAMPILOT_STEER_RATIO`, `BEAMPILOT_WHEELBASE_M`, `BEAMPILOT_CENTER_TO_FRONT_M`,
+`BEAMPILOT_MASS_KG`, `BEAMPILOT_ROTATIONAL_INERTIA`, `BEAMPILOT_STEER_LOCK_DEG`.
+
+| Setting | Default | |
+|---|---|---|
+| `BEAMPILOT_GEOMETRY_PORT` | `49156` | Mod → `beamngd`, loopback. |
+| `BEAMPILOT_GEOMETRY_RATE_HZ` | `1` | Nothing here changes quickly. |
+| `BEAMPILOT_GEOMETRY_MIN_STEER_DEG` | `20` | Below this the road wheel angle is mostly toe-in and node jitter. |
+| `BEAMPILOT_GEOMETRY_MIN_WHEEL_DEG` | `0.3` | Same, from the other end. |
+| `BEAMPILOT_GEOMETRY_DEBUG` | `0` | Log the measured numbers to BeamNG's console each time they're sent. |
+
+> [!NOTE]
+> This needs the mod reinstalled (`./setup_beampilot.sh`). With an old mod nothing arrives and
+> beampilot falls back to the Civic's numbers on its own — the fingerprint and every code path
+> around it are unchanged either way.
+
+Watch it live, with openpilot stopped:
+
+```bash
+uv run python openpilot/common/beampilot_vehicle.py
+```
 
 > [!WARNING]
-> Changing `FINGERPRINT` breaks `beamngd`, which hand-packs Honda Bosch CAN messages
+> Any *other* `FINGERPRINT` breaks `beamngd`, which hand-packs Honda Bosch CAN messages
 > (`ENGINE_DATA`, `WHEEL_SPEEDS`, `POWERTRAIN_DATA`, `ACC_HUD`…) against
 > `honda_bosch_radarless_generated.dbc`. Another car needs all of that rewritten against its own
 > DBC, plus rework of the cruise-engagement path.
@@ -683,7 +789,7 @@ thing to check.
 
 | What | Where | Symptom if wrong |
 |---|---|---|
-| Steering lock | `BEAMPILOT_STEER_LOCK_DEG` | Oversteers (too low) or runs wide (too high) |
+| Steering lock and ratio | measured by the mod; `BEAMPILOT_STEER_LOCK_DEG` / `BEAMPILOT_STEER_RATIO` to pin | Oversteers (too low) or runs wide (too high) |
 | Camera height | `offUp` in `openpilot_cam` | Misjudges distance — the model assumes ~1.22 m |
 | Camera fore/aft | `offFwd` | Too much or too little hood in frame |
 | Lateral offset | `offRight` | Tracks consistently to one side of the lane |
@@ -710,8 +816,10 @@ the lane rather than breaking it outright. Worth knowing before you spend an eve
 it's a real imperfection, but usually not the one causing your problem. `offRight` in the camera
 mod corrects it if a particular car tracks consistently to one side.
 
-Each vehicle also has its own steering lock, so set `BEAMPILOT_STEER_LOCK_DEG` when you switch
-cars (hold full lock and read `steering_wheel_deg` in the monitor).
+Each vehicle also has its own steering lock and its own rack ratio — but you no longer set those
+by hand when you switch cars. The mod measures both off the vehicle BeamNG spawned; see
+[driving the car BeamNG actually spawned](#driving-the-car-beamng-actually-spawned). Turn the wheel
+lock to lock once after switching and the ratio is measured immediately.
 
 <details>
 <summary><b>Using BeamNG's dashboard camera instead</b></summary>
@@ -918,6 +1026,7 @@ flowchart TB
     FAKE ==>|"can · accelerometer<br/>gyroscope · gpsLocationExternal<br/>pandaStates"| CARD
     BNG -->|"<b>UDP 49154</b><br/>blind spot → carState"| CARD
     LUA ==>|"<b>UDP 49155</b><br/>radar points → radarTracks"| CARD
+    LUA ==>|"<b>UDP 49156</b><br/>wheelbase · mass · COG · yaw inertia<br/>steering lock · rack ratio"| BNG
     CARD -->|"carState"| MODELD
     CTRL ==>|"<b>controlsState</b><br/>desiredCurvature (1/m)"| BNG
     BNG ==>|"<b>UDP 49153</b> JSON<br/>steering −1‥1 · throttle · brake"| LUA
@@ -1085,7 +1194,8 @@ Two details that matter more than they look:
    (`curvature_factor`) that a flat `angle = curvature × wheelbase × steerRatio` formula misses.
    Real tyres need *more* wheel angle for the same curvature the faster you go, which is why a
    single fixed gain works at one speed and not another.
-5. Radians → degrees → divided by `BEAMPILOT_STEER_LOCK_DEG` → normalised to −1…1.
+5. Radians → degrees → divided by the steering lock (the spawned vehicle's own, measured by the
+   mod; `BEAMPILOT_STEER_LOCK_DEG` to pin one) → normalised to −1…1.
 6. Rate-limited toward that target (not integrated as a velocity — see below), then sent as JSON
    over UDP.
 7. The Lua mod calls `input.event("steering", v, FILTER_DIRECT)`.
@@ -1279,11 +1389,17 @@ rigidly-mounted FOV-matched camera; this needs a second one plus a second captur
 
 ### Steering geometry mismatch
 
-openpilot computes a steering angle from the **Civic's** steer ratio (15.38) and wheelbase
-(2.700 m). Your BeamNG car has neither. Only the steering lock has been measured and made
-configurable, so commanded curvature and achieved curvature still don't match and the car runs
-wide. The real fix is calibrating the mapping against measured yaw rate, which the telemetry
-already carries.
+**Mostly fixed** — the mod measures the spawned vehicle's wheelbase, weight distribution, mass,
+yaw inertia, steering lock and rack ratio and sends them over, so openpilot no longer steers a
+Civic's geometry through a car that isn't one. See
+[driving the car BeamNG actually spawned](#driving-the-car-beamng-actually-spawned).
+
+What is left: the rack ratio is a single number fitted through the origin, so a vehicle with a
+genuinely **progressive** rack (more ratio near centre than at lock) is still approximated by one
+average. And the conversion remains **open loop** — nothing integrates the residual error between
+commanded and achieved curvature. `paramsd`'s live estimate partly covers that, and
+`tools/beampilot_monitor.py` will tell you how far off it still is, but a closed loop on yaw rate
+would be the real answer.
 
 ### Smaller things
 

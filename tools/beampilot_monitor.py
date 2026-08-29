@@ -38,7 +38,7 @@ STATE_CHANNELS = [
 ALL = [c for c in INPUT_CHANNELS + STATE_CHANNELS if c in SERVICE_LIST]
 
 WIDTH = 78                      # header rule width; output is clipped to the real terminal width
-CIVIC_STEER_RATIO = 15.38   # what beamngd converts with unless overridden
+CIVIC_STEER_RATIO = 15.38   # the fingerprint's; the fallback when nothing measures one
 
 WINDOW_SECONDS = env_float("BEAMPILOT_MONITOR_WINDOW", 2.0)
 # A channel is flagged when its measured rate falls outside this band around the
@@ -263,12 +263,14 @@ def main():
             out.append(f"  {YEL}following only {follow * 100:3.0f}% of the command{RST}"
                        + f" -- under-turning by {1 / follow:.2f}x")
             out.append("      if this holds steady across corners, the steering geometry is off:")
-            out.append(f"      BEAMPILOT_STEER_RATIO ~ {need:.1f} (currently using the Civic's {CIVIC_STEER_RATIO})")
+            out.append("      turn the wheel lock to lock once -- the mod measures the real ratio")
+            out.append(f"      and reports it. To pin one by hand: BEAMPILOT_STEER_RATIO ~ {need:.1f}"
+                       + f" (the Civic's is {CIVIC_STEER_RATIO})")
             out.append("      if it only appears at high lateral accel, the tyres are sliding instead")
           elif follow > 1.25:
             need = CIVIC_STEER_RATIO / follow
             out.append(f"  {YEL}over-turning by {follow:.2f}x{RST}"
-                       + f" -- BEAMPILOT_STEER_RATIO ~ {need:.1f}")
+                       + f" -- to pin one by hand, BEAMPILOT_STEER_RATIO ~ {need:.1f}")
           else:
             out.append(f"  following {follow * 100:3.0f}% of the command -- conversion looks right")
         else:

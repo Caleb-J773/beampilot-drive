@@ -211,24 +211,59 @@ def build_sections() -> list[Section]:
               + " mode, or messing about in a car park. Off pins the gear to drive.",
               "1", choices=["1", "0"]),
       Setting("FINGERPRINT", "Fingerprint",
-              "Changing this breaks beamngd -- CAN layouts differ per car.",
-              "HONDA_CIVIC_2022",
+              "BEAMPILOT is our own opendbc platform: the same Honda Bosch CAN beamngd packs,"
+              + " without a Civic's steering rack, weight distribution and engagement speeds"
+              + " coming with it. Its geometry is a placeholder -- the mod measures the real"
+              + " vehicle. HONDA_CIVIC_2022 is the old behaviour and is still fully supported;"
+              + " every engagement-critical value is identical between the two. Anything else"
+              + " needs beamngd rewritten.",
+              "BEAMPILOT", choices=["BEAMPILOT", "HONDA_CIVIC_2022"],
               warn="beamngd packs Honda Bosch CAN; another car needs code changes"),
+      Setting("BEAMPILOT_BEAMNG_GEOMETRY", "Measure the real vehicle",
+              "The mod measures the vehicle BeamNG actually spawned -- wheelbase, weight"
+              + " distribution, mass, yaw inertia, steering lock, and the rack ratio -- and sends"
+              + " them over, so openpilot steers the car in front of you instead of a Honda."
+              + " THE setting for a car that understeers through corners when raising the lateral"
+              + " limit changed nothing. Needs the mod reinstalled (./setup_beampilot.sh); with an"
+              + " old mod nothing arrives and it falls back to the Civic on its own."
+              + " Off restores exactly the pre-measurement behaviour.",
+              "1", choices=["1", "0"]),
+      Setting("BEAMPILOT_LIVE_STEER_PARAMS", "Follow the live estimate",
+              "paramsd estimates the steering ratio and tyre stiffness from how the car actually"
+              + " responds, and stock openpilot feeds that back every tick. When the mod has"
+              + " measured a ratio, that one is pinned instead and only the tyre stiffness is"
+              + " followed -- geometry beats inference. Off freezes both at their static values.",
+              "1", choices=["1", "0"]),
       Setting("BEAMPILOT_STEER_RATIO", "Steering ratio",
-              "How many degrees of steering wheel per degree of road wheel. THE setting to check if"
-              + " the car understeers through corners and raising the lateral limit changed nothing:"
-              + " beampilot converts openpilot's requested curvature into a wheel angle with this,"
-              + " open loop, so if it is too low the car under-turns forever and nothing corrects it."
-              + " Blank uses the fake Honda Civic's 15.38, which is almost certainly wrong for your"
-              + " BeamNG vehicle. Measure it: the monitor compares commanded against achieved"
-              + " curvature in a steady corner and prints the value that would match.",
+              "How many degrees of steering wheel per degree of road wheel. Blank means measured:"
+              + " the mod fits it from the real steering wheel angle against the real road wheel"
+              + " angle, which needs you to have actually turned the wheel (20 deg by default)."
+              + " Set it to pin a value and ignore the measurement -- the Civic's is 15.38.",
               "", numeric=True, step=0.5),
       Setting("BEAMPILOT_WHEELBASE_M", "Wheelbase (m)",
-              "Front axle to rear axle. Blank uses the Civic's 2.70. Much less important than the"
-              + " steering ratio above -- it mostly affects the speed-dependent understeer term.",
+              "Front axle to rear axle. Blank means measured. Set it to pin one; the Civic's is 2.70."
+              + " Much less important than the steering ratio -- it mostly affects the"
+              + " speed-dependent understeer term.",
               "", numeric=True, step=0.05),
+      Setting("BEAMPILOT_CENTER_TO_FRONT_M", "Centre of gravity to front axle (m)",
+              "Where the weight sits between the axles, which is what makes a car understeer or"
+              + " oversteer. Blank means measured from every node's mass. Civic 1.08.",
+              "", numeric=True, step=0.05),
+      Setting("BEAMPILOT_MASS_KG", "Mass (kg)",
+              "Blank means measured. Civic 1462.",
+              "", numeric=True, step=25.0),
+      Setting("BEAMPILOT_ROTATIONAL_INERTIA", "Yaw inertia (kg m2)",
+              "How hard the car is to rotate about its vertical axis. Blank means measured, which"
+              + " is a real integral over the body -- openpilot's own value is extrapolated from a"
+              + " Civic's mass and wheelbase. Civic 2500.",
+              "", numeric=True, step=100.0),
       Setting("BEAMPILOT_STEER_LOCK_DEG", "Steering lock (deg)",
-              "Your BeamNG vehicle's full lock. Measure it in the monitor. Too low oversteers, too high runs wide.",
+              "Centre to full lock: the divisor that turns a steering wheel angle into BeamNG's"
+              + " -1..1 input. Too low oversteers, too high runs wide. Leave it alone and the mod"
+              + " reads the real one out of the spawned vehicle's jbeam, which is exact and"
+              + " per-vehicle; 510 is only the fallback for when nothing reports one. Change it"
+              + " here to pin one value for every car -- beamngd then warns at startup if it is"
+              + " more than 10% off what the car actually has.",
               "510.0", numeric=True, step=10.0),
       Setting("BEAMPILOT_CALIBRATION", "Calibration",
               "instant = start already calibrated at a level pose, usable right away. "

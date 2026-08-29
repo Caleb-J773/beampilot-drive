@@ -22,6 +22,8 @@ fork simulates has BSM messages in its DBC.
 | `selfdrive/controls/lib/longitudinal_planner.py` | `BEAMPILOT_ACCEL_SCALE` / `_DECEL_SCALE` |
 | `selfdrive/selfdrived/selfdrived.py` | `BEAMPILOT_IGNORE_COMM_ISSUE` |
 | `selfdrive/car/card.py` | `BEAMPILOT_BSM` — overlay blind spot onto `carState`; `BEAMPILOT_RADAR` — fill in the empty `RadarData` (see gotchas) |
+| `tools/opendbc_beampilot_car/` | our own opendbc platform, `BEAMPILOT` — the car openpilot is actually driving |
+| `tools/install_beampilot_car.py` | installs that platform into the opendbc submodule; run from setup AND launch |
 | `selfdrive/controls/radard.py` | `BEAMPILOT_RADAR_LEADS` — let a ground-truth track be the lead with no vision confirmation |
 | `selfdrive/selfdrived/selfdrived.py` | the "Lane Change Cancelled" alert, added straight to the `AlertManager` |
 | `selfdrive/ui/onroad/augmented_road_view.py` | renders `BlindSpotRenderer` at the file's own "custom UI extension point" |
@@ -31,8 +33,10 @@ fork simulates has BSM messages in its DBC.
 BeamNG.drive
   │  (Lua mod: tools/beamng_mod/beampilot_bridge)
   │  UDP 49152  telemetry out  ──────────┐   (+ blind spot flags in dashLights)
-  │  UDP 49153  control in     ◄───────┐ │   (+ BSM tuning, re-sent every 2s)
-  ▼                                    │ │
+  │  UDP 49153  control in     ◄───────┐ │   (+ BSM/radar/geometry tuning, every 2s)
+  │  UDP 49155  radar points ──────────┼─┼──► card ──► radarTracks
+  │  UDP 49156  vehicle geometry ──────┤ │   (wheelbase, mass, COG, yaw inertia,
+  ▼                                    │ │    steering lock, measured rack ratio)
 screen  ──► beamcamd.py ──► VisionIPC ─┼─┼──► modeld ──► modelV2
                                        │ │                  │
             beamngd.py ────────────────┘ │             plannerd/controlsd
@@ -47,9 +51,16 @@ screen  ──► beamcamd.py ──► VisionIPC ─┼─┼──► modeld �
 2. `modeld` (stock) → `modelV2` predicted path
 3. `plannerd`/`controlsd` (stock) → `controlsState.desiredCurvature` (1/m)
 4. `beamngd.py:send_control()` — **our translation layer**:
-   - `VehicleModel.get_steer_from_curvature(curvature, speed, 0.0)` → wheel angle (rad)
-   - → degrees → `/ MAX_STEERING_WHEEL_ANGLE_DEG (510.0)` → normalized `-1..1`
+   - `VehicleModel.get_steer_from_curvature(curvature, speed, roll)` → wheel angle (rad)
+   - → degrees → `/ self.steer_lock_deg` → normalized `-1..1`
    - rate-limited, then sent as JSON over UDP to `127.0.0.1:49153`
+
+   The `VehicleModel` is **not** the fingerprinted Civic's. `beampilot_vehicle.py` receives the
+   mod's measurement of the vehicle BeamNG actually spawned (UDP 49156) and
+   `refresh_vehicle_model()` rebuilds the model on it — including re-deriving tyre stiffness at
+   the new geometry, since opendbc's `scale_tire_stiffness()` computes it from mass and weight
+   distribution. `steer_lock_deg` comes from the same packet. `BEAMPILOT_BEAMNG_GEOMETRY=0`, or
+   simply no packets arriving, restores the Civic's numbers exactly.
 5. Lua mod `pollControl()` → `input.event("steering", v, FILTER_DIRECT)`
    (the same function BeamNG's own AI driver uses)
 
@@ -278,8 +289,50 @@ These were each a real bug that cost significant debugging time. Don't regress t
   every cycle) but it makes a test read zeros and pass on nothing. The parser also ignores a
   packet whose timestamp has not advanced, and drops a repeat whose counter has not moved.
 - **Vehicle Lua cannot read the environment.** Anything configurable in the mod has to travel
-  down inside the control packet; `beamngd` re-sends the BSM block every 2s so a vehicle reload
-  (which resets the mod to its own defaults) picks the settings back up.
+  down inside the control packet; `beamngd` re-sends the BSM/radar/geometry blocks every 2s so a
+  vehicle reload (which resets the mod to its own defaults) picks the settings back up.
+- **jbeam node coordinates are y-forward, x-right -- but don't rely on it.** `esc.lua` builds
+  forward/right vectors from `v.data.refNodes[0]` (`.ref`, `.back`, `.up`) and classifies wheels
+  by dot product, precisely so a differently-oriented jbeam still works. `beampilot.lua`'s
+  geometry measurement does the same and then projects EVERYTHING (axles, COG, track width) onto
+  those axes, so the numbers cannot disagree with each other.
+- **`BEAMPILOT` lives in THIS repo, not in the opendbc submodule.** `tools/opendbc_beampilot_car/`
+  is the source of truth; `tools/install_beampilot_car.py` symlinks it into
+  `opendbc_repo/opendbc/car/beampilot` and patches two of comma.ai's files (the brand import +
+  `Platform` union in `car/values.py`, and a `torque_data/override.toml` entry -- `get_std_params`
+  KeyErrors without the latter). Committing inside the submodule instead would work on one machine
+  and break every clone, since the parent records no new submodule SHA. A `git submodule update`
+  reverts both patches silently, which is why launch re-runs the installer, and why it falls back
+  to `HONDA_CIVIC_2022` rather than starting on a car that does not exist.
+- **`BEAMPILOT` is a real opendbc platform, not a renamed Honda.** It REUSES Honda's `CarState`/`CarController` verbatim,
+  because `beamngd` hand-packs Honda Bosch radarless frames and those classes branch on `flags`
+  and `DBC[carFingerprint]`, never on "is this a Civic". `values.py` mutates
+  `honda.values.DBC` to register `BEAMPILOT` in it -- without that, `DBC[CP.carFingerprint]`
+  KeyErrors inside Honda's CarState. Three things bit during the port, all silent:
+  `pcmCruise` (the LIVE Civic is alpha-long, so pcmCruise is FALSE, not True as the old beamngd
+  comment claimed -- getting it wrong makes openpilot ignore the cruise keys entirely);
+  `transmissionType` (unset means `unknown`, which happens to take the right branch in Honda's
+  CarState -- correct by accident, now stated); and `steerControlType` (`angle` is tempting since
+  beamngd sends a position, but `LatControlAngle` flags saturation past 2.5 deg of error and the
+  mod's rack lags more than that through any corner -- permanent "Turn Exceeds Steering Limit").
+  Verify a platform change by decoding real `SimulatedCar` CAN through both platforms and
+  diffing `carState`; `send_can_messages` RETURNS NONE and publishes over pub/sub, so a harness
+  that uses its return value silently compares two all-zero states.
+- **`car_events.py` branches on `CP.brand`**, and `brand` is now `beampilot`, not `honda`. Every
+  event in that Honda branch is guarded by `if self.CP.pcmCruise`, and `pcmCruise` is pinned
+  False, so the branch is a no-op for the Civic too -- which is exactly why `pcmCruise` is pinned
+  rather than left free to follow `alpha_long`.
+- **There is no `obj:getTotalMass()`.** Mass is `sum(node.nodeWeight)` over `v.data.nodes`, which
+  is also where the centre of gravity and the yaw inertia come from.
+- **BeamNG has no steering-ratio field** -- a rack ratio is emergent from the steering geometry,
+  not declared. Measure it: `obj:nodeVecPlanarCosRightForward(wheel.node1, wheel.node2)` gives the
+  road wheel angle (this is how `esc.lua` gets `wheelAngleFront`), fit that against
+  `electrics.values.steering`. Average the two front wheels -- Ackermann and toe-in both cancel.
+  `v.data.input.steeringWheelLock` IS declared, and is centre-to-lock, not lock-to-lock.
+- **Growing the telemetry struct breaks every old mod.** `parse_telemetry()` rejects any packet
+  whose length is not an exact match, so a new field means "no telemetry at all" rather than "no
+  new field". New data gets its own packet on its own port (49155 radar, 49156 geometry); only
+  boolean flags cheap enough to ride in spare `dashLights` bits go in the struct.
 - **`table.clear` exists in BeamNG's Lua but not in a bare `luajit`.** `require("table.clear")`
   in any standalone harness, or the scan dies inside its `pcall` and the symptom is a feature
   that silently never fires.
@@ -391,8 +444,11 @@ is visible and the view clips slightly. It still drives, but the model gets less
 context it was trained on — suspect framing first when a particular car behaves badly, and tune
 `offUp`/`offFwd` in the camera mod.
 
-Steering lock is per-vehicle: set `BEAMPILOT_STEER_LOCK_DEG` when switching cars (hold full lock,
-read `steering_wheel_deg` in the monitor).
+Steering lock and rack ratio are per-vehicle, and the mod measures both (UDP 49156) rather than
+needing them set. The ratio needs the wheel actually turned to be measurable -- turn lock to lock
+once after switching cars and it lands immediately. `BEAMPILOT_STEER_LOCK_DEG` /
+`BEAMPILOT_STEER_RATIO` still pin a value if you want one; `BEAMPILOT_BEAMNG_GEOMETRY=0` restores
+the fingerprinted Civic's numbers entirely.
 
 The camera also lands **off-centre** on some cars: it's placed relative to `veh:getPosition()`,
 the jbeam reference node, which isn't reliably on the centreline. Drives well regardless — lane
@@ -412,6 +468,9 @@ smoothing all violate that, and it has none of them.
 - `gasPressed` reads True when the throttle isn't touched (BeamNG throttle → `PEDAL_GAS`),
   which openpilot treats as a driver override.
 - `beamcamd` shows ~6% frame drop; `driverStateV2`/`driverMonitoringState` run 33Hz vs 20 expected.
+- The measured rack ratio is a single number fitted through the origin, so a genuinely
+  progressive rack is approximated by one average. The curvature -> steering conversion is still
+  open loop; `paramsd` partly covers the residual, a real yaw-rate loop would not.
 
 ## Reference
 

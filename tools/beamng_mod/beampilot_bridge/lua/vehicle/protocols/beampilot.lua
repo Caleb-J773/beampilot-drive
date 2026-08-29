@@ -125,10 +125,41 @@ local RADAR_DEFAULTS = {
 
 local RADAR_MAX_TRACKS = 24 -- must match MAX_TRACKS in beampilot_radar.py
 
-local bsm, radar = {}, {}
+-- ---------------------------------------------------------------------------
+-- Vehicle geometry: telling openpilot what car it is actually driving.
+--
+-- openpilot is fingerprinted as a Honda Civic because a fingerprint is not
+-- optional, and it turns its desired PATH into a steering command using that
+-- Civic's wheelbase, weight distribution and steering rack. BeamNG is not
+-- spawning a Civic, and beamngd's conversion is open loop -- nothing anywhere
+-- integrates the error between the curvature asked for and the curvature
+-- achieved -- so a vehicle that needs more lock for the same corner simply
+-- under-turns forever.
+--
+-- Every number it needs is in v.data.nodes and wheels.wheels. This is the same
+-- measurement BeamNG's own ESC controller does for the same bicycle-model
+-- reason; see lua/vehicle/controller/esc.lua calculateAxleDistances().
+--
+-- The steer ratio is the exception: BeamNG has no such field, because a rack
+-- ratio is emergent from the steering geometry rather than declared. So it is
+-- MEASURED, by watching the real steering wheel angle against the real road
+-- wheel angle while the car is driven and fitting a line through the origin.
+-- See beampilot_vehicle.py for the whole rationale and the wire format.
+local VEHICLE_DEFAULTS = {
+  enabled = 1,          -- on: BeamNG's numbers beat a Honda's for a non-Honda
+  port = 49156,         -- straight to beamngd.py, which owns the VehicleModel
+  rateHz = 1.0,         -- nothing here changes quickly
+  minSteerDeg = 20.0,   -- below this the road wheel angle is mostly toe-in
+  minWheelDeg = 0.3,    -- ...and node jitter, and dividing by it is nonsense
+  minSamples = 10,      -- do not report a ratio built from one odd moment
+  debug = 0,
+}
+
+local bsm, radar, vehicleCfg = {}, {}, {}
 local function resetPerceptionConfig()
   for k, v in pairs(BSM_DEFAULTS) do bsm[k] = v end
   for k, v in pairs(RADAR_DEFAULTS) do radar[k] = v end
+  for k, v in pairs(VEHICLE_DEFAULTS) do vehicleCfg[k] = v end
 end
 resetPerceptionConfig()
 
@@ -207,6 +238,43 @@ do
   end
 end
 
+-- The geometry packet. Fixed size, unlike radar's -- there is no count to vary,
+-- and beampilot_vehicle.py drops anything whose length is not an exact match,
+-- so a stale mod paired with a new beamngd reports no geometry rather than
+-- garbage geometry. pack(1) for the same reason as above: the Python side
+-- unpacks with '<', which does not pad.
+local vehicleFfi, vehiclePacket, vehicleSocket
+do
+  local ok, ffi = pcall(require, "ffi")
+  if ok then
+    vehicleFfi = ffi
+    pcall(ffi.cdef, [[
+      #pragma pack(push, 1)
+      typedef struct {
+        char magic[4];
+        char name[32];
+        float wheelbase;
+        float centerToFront;
+        float trackWidth;
+        float mass;
+        float rotationalInertia;
+        float steerRatio;
+        float steerLockDeg;
+        float maxWheelAngleDeg;
+        uint32_t steerSamples;
+      } beampilot_vehicle_packet_t;
+      #pragma pack(pop)
+    ]])
+    local made, packet = pcall(ffi.new, "beampilot_vehicle_packet_t")
+    if made then
+      vehiclePacket = packet
+      ffi.copy(vehiclePacket.magic, "BPV1", 4)
+    else
+      vehicleFfi = nil
+    end
+  end
+end
+
 local function applyConfig(target, defaults, cfg)
   for k, default in pairs(defaults) do
     local v = cfg[k]
@@ -222,6 +290,7 @@ end
 
 local function applyBsmConfig(cfg) applyConfig(bsm, BSM_DEFAULTS, cfg) end
 local function applyRadarConfig(cfg) applyConfig(radar, RADAR_DEFAULTS, cfg) end
+local function applyVehicleConfig(cfg) applyConfig(vehicleCfg, VEHICLE_DEFAULTS, cfg) end
 
 -- Fills in one BSM zone's centre and forward half-extent. Positive `side` is
 -- the ego's right. halfLen/halfWidth are the ego's own half extents, so the
@@ -259,6 +328,248 @@ local function radarSend()
   -- time would waste most of a 400-byte datagram at 20Hz for nothing.
   local bytes = radarFfi.string(radarPacket, 5 + count * 16)
   radarSocket:sendto(bytes, CONTROL_ADDRESS, radar.port)
+end
+
+-- ---------------------------------------------------------------------------
+-- Vehicle geometry measurement. See VEHICLE_DEFAULTS above for why.
+--
+-- Everything static is measured ONCE per spawn, from the jbeam node table.
+-- Rather than reading node.pos.y and node.pos.x directly (which assumes the
+-- jbeam's own axis convention), each position is projected onto forward/right
+-- axes built from refNodes -- the same construction esc.lua uses to work out
+-- which wheel is which. One frame for the axles, the centre of gravity and the
+-- track width means they cannot disagree with each other.
+local vehicleAccum = 0
+local vehicleName = ""
+local vehicleStatic = nil            -- nil until measured; retried until it works
+local vehicleFrontWheels = nil       -- {leftWheelId, rightWheelId}
+local steerSumXY, steerSumXX, steerSamples = 0, 0, 0
+
+local function vehicleResetMeasurements()
+  vehicleAccum = 0
+  vehicleName = ""
+  vehicleStatic = nil
+  vehicleFrontWheels = nil
+  steerSumXY, steerSumXX, steerSamples = 0, 0, 0
+end
+
+-- Forward and right unit vectors in node space, from the reference nodes every
+-- jbeam declares. nil if this vehicle has none (some props and trailers).
+local function vehicleAxes()
+  local refs = v.data.refNodes and v.data.refNodes[0]
+  if not refs then return nil end
+  local nodes = v.data.nodes
+  local ref, back, up = nodes[refs.ref], nodes[refs.back], nodes[refs.up]
+  if not (ref and back and up) then return nil end
+  local fwd = (vec3(ref.pos) - vec3(back.pos)):normalized()
+  local upv = (vec3(up.pos) - vec3(ref.pos)):normalized()
+  local right = fwd:cross(upv):normalized()
+  if fwd:squaredLength() < 0.5 or right:squaredLength() < 0.5 then return nil end
+  return fwd, right
+end
+
+-- Splits the wheels into a front pair and a rear pair. Every wheel is scored by
+-- how far forward and how far right it sits relative to the average wheel
+-- position; the front pair is the most-forward wheel on each side and the rear
+-- pair the most-rearward, which is what makes this right for a six-wheeler too
+-- (esc.lua's version keeps whichever front wheel it saw last).
+local function vehicleClassifyWheels(fwd, right)
+  local nodes = v.data.nodes
+  local avg, count = vec3(0, 0, 0), 0
+  for id, wheel in pairs(wheels.wheels) do
+    local node = wheel.node1 and nodes[wheel.node1]
+    if node then
+      avg = avg + vec3(node.pos)
+      count = count + 1
+    end
+  end
+  if count < 4 then return nil end   -- not a car in any sense openpilot models
+  avg = avg / count
+
+  local best = {}   -- ["frontLeft"] = {id = , f = }, etc.
+  for id, wheel in pairs(wheels.wheels) do
+    local node = wheel.node1 and nodes[wheel.node1]
+    if node then
+      local pos = vec3(node.pos)
+      local off = pos - avg
+      local f, r = fwd:dot(off), right:dot(off)
+      local key = (f >= 0 and "front" or "rear") .. (r >= 0 and "Right" or "Left")
+      local cur = best[key]
+      -- Most forward wins at the front, most rearward at the rear.
+      if not cur or (f >= 0 and f > cur.f) or (f < 0 and f < cur.f) then
+        best[key] = {id = id, f = fwd:dot(pos), r = right:dot(pos), node = node}
+      end
+    end
+  end
+  if not (best.frontLeft and best.frontRight and best.rearLeft and best.rearRight) then
+    return nil
+  end
+  return best
+end
+
+-- Mass-weighted centroid and yaw moment of inertia, over every node in the
+-- vehicle. openpilot's VehicleModel wants both, and its stock rotationalInertia
+-- is scale_rot_inertia() -- a guess extrapolated from a Civic's mass and
+-- wheelbase. This is the actual integral over the actual body.
+local function vehicleMassProperties(fwd, right)
+  local sumF, sumR, mass = 0, 0, 0
+  for _, node in pairs(v.data.nodes) do
+    local w = node.nodeWeight or 0
+    if w > 0 then
+      local pos = vec3(node.pos)
+      sumF = sumF + fwd:dot(pos) * w
+      sumR = sumR + right:dot(pos) * w
+      mass = mass + w
+    end
+  end
+  if mass <= 0 then return nil end
+  local cogF, cogR = sumF / mass, sumR / mass
+  local inertia = 0
+  for _, node in pairs(v.data.nodes) do
+    local w = node.nodeWeight or 0
+    if w > 0 then
+      local pos = vec3(node.pos)
+      local df, dr = fwd:dot(pos) - cogF, right:dot(pos) - cogR
+      inertia = inertia + w * (df * df + dr * dr)
+    end
+  end
+  return mass, cogF, cogR, inertia
+end
+
+local function vehicleMeasureStatic()
+  local fwd, right = vehicleAxes()
+  if not fwd then return false end
+  local w = vehicleClassifyWheels(fwd, right)
+  if not w then return false end
+  local mass, cogF, _, inertia = vehicleMassProperties(fwd, right)
+  if not mass then return false end
+
+  local frontAxle = (w.frontLeft.f + w.frontRight.f) * 0.5
+  local rearAxle = (w.rearLeft.f + w.rearRight.f) * 0.5
+  local wheelbase = math.abs(frontAxle - rearAxle)
+  if wheelbase < 0.5 then return false end
+
+  vehicleFrontWheels = {w.frontLeft.id, w.frontRight.id}
+  vehicleStatic = {
+    wheelbase = wheelbase,
+    centerToFront = math.abs(frontAxle - cogF),
+    trackWidth = math.abs(w.frontLeft.r - w.frontRight.r),
+    mass = mass,
+    rotationalInertia = inertia,
+    -- Centre to full lock, in steering wheel degrees: hydros.lua computes
+    -- electrics.values.steering as the -1..1 rack position times this, so it is
+    -- exactly the divisor beamngd needs to go the other way.
+    steerLockDeg = (v.data.input and v.data.input.steeringWheelLock) or 0,
+  }
+  vehicleName = (v.data.information and v.data.information.name)
+                or (v.config and v.config.model) or ""
+  return true
+end
+
+-- The average of the two front wheels' steer angles, in degrees, unsigned.
+-- Averaging the pair is not just noise reduction: the inner wheel steers more
+-- than the outer (Ackermann), and the bicycle model wants the mean of the two;
+-- and toe-in, which is equal and opposite on the two sides, cancels.
+-- obj:nodeVecPlanarCosRightForward is the same call esc.lua measures its own
+-- wheelAngleFront with.
+local function vehicleWheelAngleDeg()
+  if not vehicleFrontWheels then return nil end
+  local total, n = 0, 0
+  for _, id in ipairs(vehicleFrontWheels) do
+    local wheel = wheels.wheels[id]
+    if wheel and wheel.node1 and wheel.node2 then
+      local c = obj:nodeVecPlanarCosRightForward(wheel.node1, wheel.node2)
+      if c == c then                                    -- c ~= c means NaN
+        local a = math.acos(math.max(-1, math.min(1, c)))
+        if a > 1.5707963 then a = math.pi - a end       -- axle vector's own sign
+        total = total + a
+        n = n + 1
+      end
+    end
+  end
+  if n == 0 then return nil end
+  return math.deg(total / n)
+end
+
+-- One sample of (steering wheel angle, road wheel angle), fitted as a straight
+-- line through the origin: ratio = sum(sw*rw) / sum(rw*rw). Least squares
+-- rather than a running average of sw/rw, because that average is dominated by
+-- the smallest, least reliable samples -- the ones where rw is nearly zero.
+local function vehicleSampleSteerRatio()
+  local sw = electrics.values.steering
+  if not sw then return end
+  sw = math.abs(sw)
+  if sw < vehicleCfg.minSteerDeg then return end
+  local rw = vehicleWheelAngleDeg()
+  if not rw or rw < vehicleCfg.minWheelDeg then return end
+  steerSumXY = steerSumXY + sw * rw
+  steerSumXX = steerSumXX + rw * rw
+  steerSamples = steerSamples + 1
+end
+
+local function vehicleSend()
+  if not vehicleFfi or not vehiclePacket or not vehicleStatic then return end
+  if not vehicleSocket then
+    local sock = socket.udp()
+    if not sock then return end
+    sock:settimeout(0)
+    vehicleSocket = sock
+  end
+
+  local p = vehiclePacket
+  vehicleFfi.fill(p.name, 32, 0)
+  local name = tostring(vehicleName or ""):sub(1, 31)
+  if #name > 0 then vehicleFfi.copy(p.name, name, #name) end
+
+  p.wheelbase = vehicleStatic.wheelbase
+  p.centerToFront = vehicleStatic.centerToFront
+  p.trackWidth = vehicleStatic.trackWidth
+  p.mass = vehicleStatic.mass
+  p.rotationalInertia = vehicleStatic.rotationalInertia
+  p.steerLockDeg = vehicleStatic.steerLockDeg
+  -- 0 means "no answer yet", not "zero"; the Python side sanity-checks the
+  -- range and simply leaves CarParams alone for anything that fails.
+  -- Held back until there are enough samples to average over: a single one
+  -- taken while the car was bouncing off a kerb is a real number, in range,
+  -- and wrong -- and beamngd would drive on it until the next one arrived.
+  local enough = steerSamples >= vehicleCfg.minSamples and steerSumXX > 0
+  local ratio = enough and (steerSumXY / steerSumXX) or 0
+  p.steerRatio = ratio
+  p.maxWheelAngleDeg = (ratio > 0 and vehicleStatic.steerLockDeg / ratio) or 0
+  p.steerSamples = steerSamples
+
+  vehicleSocket:sendto(vehicleFfi.string(p, vehicleFfi.sizeof(p)), CONTROL_ADDRESS, vehicleCfg.port)
+
+  if vehicleCfg.debug ~= 0 then
+    log("I", "", string.format(
+      "beampilot geometry: %s wb=%.3fm a=%.3fm tw=%.3fm m=%.0fkg J=%.0f lock=%.0fdeg sR=%.2f (%d samples)",
+      name, p.wheelbase, p.centerToFront, p.trackWidth, p.mass,
+      p.rotationalInertia, p.steerLockDeg, p.steerRatio, steerSamples))
+  end
+end
+
+-- Called every physics step. Sampling the steer ratio every step is the point
+-- (the wheel is only turned far enough to measure for a moment at a time), but
+-- sending is rate-limited: none of this changes at 100Hz.
+local function vehicleUpdate(dtSim)
+  if vehicleCfg.enabled == 0 then return end
+  -- Sampling the steer ratio every step is the point: the wheel is only turned
+  -- far enough to measure for a moment at a time, and missing those moments is
+  -- how you end up with no ratio after a whole drive.
+  if vehicleStatic then vehicleSampleSteerRatio() end
+
+  vehicleAccum = vehicleAccum + (dtSim or 0)
+  local interval = 1 / math.max(vehicleCfg.rateHz, 0.05)
+  if vehicleAccum < interval then return end
+  vehicleAccum = 0
+
+  -- Measuring is two walks over every node in the vehicle, so it happens on
+  -- the send tick and not on the step: a vehicle this cannot measure (a
+  -- trailer, a prop, one still spawning) would otherwise pay that 100 times a
+  -- second forever, having failed the first time for a reason that has not
+  -- changed.
+  if not vehicleStatic and not vehicleMeasureStatic() then return end
+  vehicleSend()
 end
 
 local function perceptionScan()
@@ -509,6 +820,9 @@ local function reset()
   bsmLeftApproach, bsmRightApproach = false, false
   radarCount = 0
   scanAccum = 0
+  -- A respawn or reload can be a DIFFERENT vehicle, so every measurement has to
+  -- go, not just be refreshed -- otherwise a truck inherits a hatchback's rack.
+  vehicleResetMeasurements()
   -- A reload or respawn drops whatever beamngd last pushed down, so go back to
   -- the built-in defaults and wait for the next config broadcast rather than
   -- carrying another vehicle's tuning over.
@@ -600,6 +914,7 @@ local function pollControl()
     -- vehicle reload picks the settings back up on its own.
     if decoded and type(msg.bsm) == "table" then applyBsmConfig(msg.bsm) end
     if decoded and type(msg.radar) == "table" then applyRadarConfig(msg.radar) end
+    if decoded and type(msg.vehicle) == "table" then applyVehicleConfig(msg.vehicle) end
     if decoded and type(msg.cancelSignal) == "string" then cancelSignal(msg.cancelSignal) end
     if decoded and msg.engaged then
       if msg.steering ~= nil then input.event("steering", msg.steering, FILTER_DIRECT) end
@@ -630,6 +945,15 @@ local function fillStruct(o, dtSim)
   -- After the init guard on purpose: obj's geometry queries are not meaningful
   -- until the vehicle is up, and this tick would not write dashLights anyway.
   perceptionUpdate(dtSim)
+
+  -- Same guard applies, and more so: v.data.nodes is only trustworthy once the
+  -- vehicle has finished spawning. Wrapped because a vehicle with no reference
+  -- nodes (a trailer, a prop) must cost us telemetry, not just geometry.
+  local geomOk, geomErr = pcall(vehicleUpdate, dtSim)
+  if not geomOk then
+    log("E", "", "beampilot geometry measurement failed: " .. tostring(geomErr))
+    vehicleCfg.enabled = 0   -- until the next config broadcast re-enables it
+  end
 
   if not cameraSelected then
     -- Auto-select the openpilot_cam mod's rigidly-mounted, FOV-matched camera

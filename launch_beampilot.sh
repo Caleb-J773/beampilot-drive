@@ -3,6 +3,16 @@
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null && pwd )"
 source "$DIR/config_beampilot.sh"
 
+# FINGERPRINT is BEAMPILOT by default, which lives in this repo rather than in
+# the opendbc submodule (see tools/install_beampilot_car.py). A `git submodule
+# update` silently reverts the two lines that register it, and the symptom is
+# openpilot failing to start on a car it cannot find -- so repair it here rather
+# than only at setup time. Silent and instant when nothing is wrong.
+python3 "$DIR/tools/install_beampilot_car.py" --quiet || {
+  echo "could not install the BEAMPILOT opendbc platform; falling back to HONDA_CIVIC_2022"
+  export FINGERPRINT="HONDA_CIVIC_2022"
+}
+
 # Seeds CalibrationParams (validBlocks=20, rpyCalib=[0,0,0]) so calibrationd
 # starts "calibrated" instead of requiring minutes of sustained 15+mph
 # straight-line driving to converge on its own (see calibrationd.py's

@@ -15,6 +15,13 @@ else
   exit 1
 fi
 
+# The BEAMPILOT opendbc platform. opendbc is a submodule pointing at
+# commaai/opendbc, which we cannot push to, so the platform lives in this repo
+# (tools/opendbc_beampilot_car) and gets installed into the submodule here --
+# the same trade the BeamNG mods below make. Idempotent, and re-applies the two
+# small edits to comma.ai's files that a `git submodule update` reverts.
+python3 "$DIR/tools/install_beampilot_car.py"
+
 BEAMNG_USERDIR="$HOME/.local/share/BeamNG/BeamNG.drive/current"
 if [ -d "$BEAMNG_USERDIR" ]; then
   MODS_DIR="$BEAMNG_USERDIR/mods/unpacked"
