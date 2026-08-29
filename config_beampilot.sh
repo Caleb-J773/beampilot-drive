@@ -23,7 +23,7 @@ export SKIP_FW_QUERY="1"
 # LATERAL (turning). The binding one is lateral accel: max curvature is
 # MAX_LAT_ACCEL / v^2, so stock 3.0 allows only a ~300m radius at 67mph.
 #   3.0 = stock/comfort   5.0 = spirited   8.0+ = approaching real tire grip
-export BEAMPILOT_MAX_LAT_ACCEL="5.0"    # m/s^2
+export BEAMPILOT_MAX_LAT_ACCEL="8.0"    # m/s^2
 export BEAMPILOT_MAX_LAT_JERK="8.0"    # m/s^3, how fast it may change curvature
 # export BEAMPILOT_MAX_CURVATURE="0.2"  # 1/m, geometric cap; only binds below ~11mph
 #

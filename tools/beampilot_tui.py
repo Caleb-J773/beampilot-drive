@@ -760,23 +760,66 @@ class Tui:
     self.status = f"{s.key} back to its default"
 
   def prompt(self, label: str, initial: str = "") -> str | None:
-    curses.echo()
-    curses.curs_set(1)
-    h, w = self.stdscr.getmaxyx()
-    self.stdscr.move(h - 1, 0)
-    self.stdscr.clrtoeol()
-    self.stdscr.addstr(h - 1, 0, label, curses.A_BOLD | curses.A_REVERSE)
-    if initial:
-      self.stdscr.addstr(h - 1, len(label), initial)
-    try:
-      raw = self.stdscr.getstr(h - 1, len(label) + len(initial),
-                               max(4, w - len(label) - 2)).decode("utf-8", "ignore")
-      out = (initial + raw).strip()
-    except (curses.error, UnicodeDecodeError):
-      out = None
+    """Read a line, with a hand-rolled editor rather than curses.getstr().
+
+    getstr() does its own line editing, and its erase handling depends on the
+    terminal's termios erase character agreeing with what curses expects.
+    Backspace simply did nothing here. It also cannot edit text that was
+    already on screen, so a pre-filled value could only be appended to -- to
+    change one character of a key binding you had to retype the whole thing.
+
+    Returns None if the edit was cancelled, so a caller can tell "escaped" from
+    "deliberately cleared".
+    """
+    buf = list(initial)
     curses.noecho()
-    curses.curs_set(0)
-    return out
+    curses.curs_set(1)
+    self.stdscr.keypad(True)
+    try:
+      while True:
+        h, w = self.stdscr.getmaxyx()
+        room = max(4, w - len(label) - 2)
+        text = "".join(buf)
+        # Show the tail when the value is longer than the space for it, so the
+        # cursor stays visible while typing.
+        shown = text[-room:]
+        self.stdscr.move(h - 1, 0)
+        self.stdscr.clrtoeol()
+        self.put(h - 1, 0, (label + shown).ljust(w - 1)[:w - 1], curses.A_REVERSE, w)
+        self.stdscr.move(h - 1, min(len(label) + len(shown), w - 2))
+        self.stdscr.refresh()
+
+        try:
+          ch = self.stdscr.getch()
+        except KeyboardInterrupt:
+          return None
+
+        if ch in (10, 13, curses.KEY_ENTER):
+          return "".join(buf).strip()
+        if ch == 27:                       # escape: leave the value alone
+          return None
+        # Every spelling of backspace. Which one arrives depends on the
+        # terminal and on whether keypad translation is on, so accept all of
+        # them rather than betting on one.
+        if ch in (curses.KEY_BACKSPACE, 127, 8):
+          if buf:
+            buf.pop()
+          continue
+        if ch == 21:                       # ctrl-u: clear the line
+          buf.clear()
+          continue
+        if ch == 23:                       # ctrl-w: delete the last word
+          while buf and buf[-1] == " ":
+            buf.pop()
+          while buf and buf[-1] != " ":
+            buf.pop()
+          continue
+        if ch == curses.KEY_RESIZE:
+          continue
+        if 32 <= ch < 127:                 # printable ASCII
+          buf.append(chr(ch))
+    finally:
+      curses.curs_set(0)
 
   def edit_text(self, s: Setting):
     raw = self.prompt(f" {s.label} = ", self.values.get(s.key, ""))
@@ -1030,6 +1073,13 @@ class Tui:
 
 
 def main(stdscr):
+  # ncurses waits a full second after a bare ESC to see whether it is the start
+  # of an escape sequence. That is the difference between "escape cancels" and
+  # "escape appears to hang".
+  try:
+    curses.set_escdelay(25)
+  except (AttributeError, curses.error):
+    pass
   curses.curs_set(0)
   curses.use_default_colors()
   curses.init_pair(1, curses.COLOR_WHITE, -1)
