@@ -32,6 +32,11 @@ export BEAMPILOT_ACCEL_SCALE="2.0"      # 1.0 = stock (1.6 m/s^2 from a stop)
 export BEAMPILOT_DECEL_SCALE="1.5"      # 1.0 = stock (-1.2 m/s^2 cruise braking)
 # ---------------------------------------------------------------------------
 
+# How closely it follows / how late it brakes for the car ahead.
+#   0 = aggressive (1.25s gap, brakes latest)   1 = standard (1.45s)
+#   2 = relaxed    (1.75s gap, brakes earliest)
+export BEAMPILOT_PERSONALITY="0"
+
 # Stop inter-process communication hiccups from blocking engagement and
 # disengaging mid-drive. Unlike the purely visual alerts, commIssue is a REAL
 # signal -- it means a process stalled or is publishing at the wrong rate, and
