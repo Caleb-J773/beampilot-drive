@@ -297,38 +297,138 @@ than leaving you to work it out from a black screen.
 ## How it works
 
 ```mermaid
-flowchart LR
-    subgraph game["BeamNG.drive"]
-        lua["Lua mod<br/>beampilot_bridge"]
+flowchart TB
+    subgraph GAME["🎮 BeamNG.drive &nbsp;·&nbsp; unmodified game"]
+        direction TB
+        PHYS["Vehicle physics<br/><i>electrics.values</i>"]
+        LUA["<b>beampilot.lua</b><br/>protocol mod<br/><i>runs every physics tick</i>"]
+        PHYS -.->|"read"| LUA
+        LUA -.->|"input.event FILTER_DIRECT"| PHYS
     end
 
-    subgraph bridge["beampilot (ours)"]
-        cam["beamcamd<br/>screen capture"]
-        bng["beamngd<br/>fake CAN/IMU/GPS"]
+    subgraph OURS["🔧 beampilot &nbsp;·&nbsp; the only code we wrote"]
+        direction TB
+        CAM["<b>beamcamd</b><br/>mss capture → NV12<br/><i>20 Hz</i>"]
+        BNG["<b>beamngd</b><br/>telemetry in, control out<br/><i>100 Hz</i>"]
+        FAKE["Honda Bosch CAN<br/>synthesiser<br/><i>+ IMU / GPS / panda</i>"]
+        BNG --> FAKE
     end
 
-    subgraph op["openpilot (stock)"]
-        modeld["modeld"]
-        controls["plannerd<br/>controlsd"]
+    subgraph OP["🚗 openpilot &nbsp;·&nbsp; stock, unmodified"]
+        direction TB
+        CARD["card<br/><i>decodes CAN → carState</i>"]
+        MODELD["<b>modeld</b><br/><i>driving model</i>"]
+        LOC["locationd · calibrationd<br/><i>pose &amp; extrinsics</i>"]
+        PLAN["plannerd<br/><i>path → plan</i>"]
+        CTRL["<b>controlsd</b><br/><i>clip_curvature + lat control</i>"]
+        SELF["selfdrived<br/><i>engagement &amp; alerts</i>"]
+
+        CARD --> SELF
+        MODELD --> PLAN
+        MODELD --> LOC
+        LOC --> PLAN
+        PLAN --> CTRL
+        SELF --> CTRL
     end
 
-    game -- "screen" --> cam
-    lua -- "UDP 49152<br/>telemetry" --> bng
-    cam -- "VisionIPC" --> modeld
-    bng -- "CAN, sensors" --> modeld
-    modeld -- "modelV2" --> controls
-    controls -- "desiredCurvature" --> bng
-    bng -- "UDP 49153<br/>steer/throttle/brake" --> lua
-    lua -- "input.event()" --> game
+    SCREEN(["🖥️ X11 window"])
+
+    GAME ==>|"rendered frames"| SCREEN
+    SCREEN ==>|"grab region"| CAM
+    LUA ==>|"<b>UDP 49152</b><br/>speed · steering angle · pos<br/>vel · accel · gyro · gear"| BNG
+    CAM ==>|"VisionIPC<br/><i>wide + narrow road</i>"| MODELD
+    FAKE ==>|"can · accelerometer<br/>gyroscope · gpsLocationExternal<br/>pandaStates"| CARD
+    CARD -->|"carState"| MODELD
+    CTRL ==>|"<b>controlsState</b><br/>desiredCurvature (1/m)"| BNG
+    BNG ==>|"<b>UDP 49153</b> JSON<br/>steering −1‥1 · throttle · brake"| LUA
+
+    KEYS(["⌨️ keyboard<br/><i>evdev</i>"])
+    KEYS -->|"i / o / u<br/>cruise buttons"| BNG
+
+    classDef gameStyle fill:#2d1b3d,stroke:#a855f7,stroke-width:2px,color:#f3e8ff
+    classDef oursStyle fill:#134e4a,stroke:#2dd4bf,stroke-width:2px,color:#ccfbf1
+    classDef opStyle fill:#1e293b,stroke:#60a5fa,stroke-width:2px,color:#dbeafe
+    classDef ioStyle fill:#422006,stroke:#f59e0b,stroke-width:2px,color:#fef3c7
+
+    class PHYS,LUA gameStyle
+    class CAM,BNG,FAKE oursStyle
+    class CARD,MODELD,LOC,PLAN,CTRL,SELF opStyle
+    class SCREEN,KEYS ioStyle
+
+    %% subgraph containers -- explicit so they don't fall back to the theme's
+    %% pale default, which clashes with the dark node fills in both GitHub modes
+    style GAME fill:#1a0f24,stroke:#a855f7,stroke-width:2px,color:#f3e8ff
+    style OURS fill:#0c2926,stroke:#2dd4bf,stroke-width:2px,color:#ccfbf1
+    style OP fill:#111827,stroke:#60a5fa,stroke-width:2px,color:#dbeafe
 ```
 
-`beamcamd` grabs the game window and publishes it as camera frames. `modeld` predicts a path.
-`controlsd` turns that into a desired curvature. `beamngd` converts curvature into a steering
-angle using opendbc's vehicle model, scales it to BeamNG's input range, and sends it over UDP.
-The Lua mod applies it with `input.event()` — the same function BeamNG's own AI driver uses.
+**Reading it:** thick arrows are the two closed loops — vision going one way, control coming
+back. `beamcamd` grabs the game window and publishes it as camera frames. `modeld` predicts a
+path. `plannerd` and `controlsd` turn that into a desired curvature. `beamngd` converts curvature
+into a steering angle using opendbc's vehicle model, scales it to BeamNG's `−1‥1` input range,
+and sends it over UDP. The Lua mod applies it with `input.event()` — the same function BeamNG's
+own AI driver uses.
 
 CAN only flows one direction. `beamngd` fabricates Honda Civic CAN frames from BeamNG telemetry
-so openpilot believes it's plugged into a real car. Nothing is sent back to the game over CAN.
+so openpilot believes it's plugged into a real car. Nothing is ever sent back to the game over
+CAN — the return path is that JSON packet on 49153.
+
+<details>
+<summary><b>What happens to a single steering command, end to end</b></summary>
+
+```mermaid
+flowchart LR
+    A["<b>modelV2</b><br/>action.desiredCurvature<br/><i>1/m, from pixels</i>"]
+    B["<b>clip_curvature</b><br/>lat accel · jerk · max<br/><i>drive_helpers.py</i>"]
+    C["<b>lateral control</b><br/>torque for a real EPS<br/><i>latcontrol_torque</i>"]
+    X(["not used here —<br/>no torque-controlled rack"])
+    D["<b>VehicleModel</b><br/>get_steer_from_curvature<br/><i>+ understeer comp.</i>"]
+    E["<b>normalise</b><br/>÷ STEER_LOCK_DEG<br/><i>→ −1‥1</i>"]
+    F["<b>rate limit</b><br/>toward target<br/><i>not integrated</i>"]
+    G["<b>UDP → Lua</b><br/>input.event<br/><i>FILTER_DIRECT</i>"]
+
+    A --> B
+    B -.->|"stock path"| C -.-> X
+    B ==>|"what beamngd uses"| D ==> E ==> F ==> G
+
+    classDef op fill:#1e293b,stroke:#60a5fa,color:#dbeafe
+    classDef ours fill:#134e4a,stroke:#2dd4bf,color:#ccfbf1
+    classDef dead fill:#292524,stroke:#78716c,color:#d6d3d1
+    class A,B,C op
+    class D,E,F,G ours
+    class X dead
+```
+
+Two details worth knowing:
+
+`clip_curvature` **clips** — openpilot does not command past its limit and merely warn. If the
+model wants a tighter turn than the lateral-accel budget allows, the excess is discarded and the
+car runs wide. That's why raising `BEAMPILOT_MAX_LAT_ACCEL` changes behaviour, and why the
+monitor's BINDING line matters.
+
+The rate limiter chases a **target position**, it does not integrate a velocity. An earlier
+version did the latter (`position += torque × gain × dt`), which has no equilibrium: any
+sustained torque marches to full lock forever. Stacked on openpilot's own PID — which already
+integrates error — that's two integrators in series and a textbook growing oscillation.
+
+</details>
+
+<details>
+<summary><b>Where every message comes from</b></summary>
+
+| Message | Rate | Published by | Built from |
+|---|---|---|---|
+| `can` | 100 Hz | `beamngd` | BeamNG telemetry → Honda Bosch frames |
+| `accelerometer` / `gyroscope` | 100 Hz | `beamngd` | `sensors.ffiSensors`, angular velocity |
+| `gpsLocationExternal` | 10 Hz | `beamngd` | world position, projected to fake lat/lon |
+| `pandaStates` | 10 Hz | `beamngd` | mirrors real `carParams.safetyConfigs` |
+| `wideRoadCameraState` / `narrowRoadCameraState` | 20 Hz | `beamcamd` | the same captured frame (see [wide camera](#no-wide-angle-camera)) |
+| `driverStateV2` / `driverMonitoringState` | ~20 Hz | `beamngd` | faked — driver monitoring is removed |
+| `carState` | 100 Hz | `card` *(stock)* | decodes our fake CAN |
+| `modelV2` | 20 Hz | `modeld` *(stock)* | the captured frames |
+| `controlsState` | 100 Hz | `controlsd` *(stock)* | the plan |
+
+</details>
 
 ### Why no BeamNG.tech
 
