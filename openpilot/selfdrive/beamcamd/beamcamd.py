@@ -1,16 +1,17 @@
+import gc
 import os
 import time
 import cv2
 import numpy as np
 import mss
+import mss.exception
 
 from openpilot.cereal.visionipc import VisionStreamType
 from openpilot.cereal import messaging
-from openpilot.common.realtime import Ratekeeper
 from msgq.visionipc import VisionIpcServer
 from openpilot.system.camerad.cameras.nv12_info import get_nv12_info
 from openpilot.common.beampilot_env import env_float, env_int
-from openpilot.selfdrive.beamcamd.window_capture import capture_support, find_window
+from openpilot.selfdrive.beamcamd.window_capture import capture_support, find_window, window_geometry
 
 # Captures the BeamNG.drive window off the X11 desktop (the openpilot_cam BeamNG
 # mod, auto-selected by the beampilot_bridge protocol Lua, guarantees this is the
@@ -33,88 +34,191 @@ TR = [1.0, 0.0, 0.0,
 # so raising it only helps if the GPU can keep up with both the game and the
 # model, and lowering it starves the model.
 CAMERA_RATE_HZ = env_float("BEAMPILOT_CAM_RATE_HZ", 20.0)
-# How often to re-read a tracked window's geometry. Every frame would mean
-# spawning xdotool at the capture rate, which is far too expensive; the window
-# only moves when the user moves it.
+# How often to re-read a tracked window's geometry. This is the CHEAP re-read
+# (one xdotool call on a known window id, ~0.7ms measured); full rediscovery is
+# ~68-285ms and only runs when the window actually disappears. See the retrack
+# block in main() for why that distinction matters.
 RETRACK_INTERVAL_S = env_float("BEAMPILOT_CAM_RETRACK_S", 2.0)
 # VisionIPC ring buffer depth, per stream.
 VIPC_BUFFER_COUNT = env_int("BEAMPILOT_VIPC_BUFFERS", 20)
 
 
-def get_capture_region(sct: mss.MSS) -> dict:
+def clamp_region(region: dict, bounds: dict) -> dict | None:
+  """Intersect a capture rectangle with the X root window, or None if disjoint.
+
+  THIS IS NOT COSMETIC -- skipping it kills the daemon. X11's GetImage raises
+  BadMatch (error 8, opcode 73) if ANY part of the requested rectangle falls
+  outside the drawable, and mss surfaces that as an uncaught
+  mss.linux.xcbhelpers.XProtoError. beamcamd exits, camerad's VisionIPC streams
+  vanish, and modeld -- which blocks in VisionIpcClient.available_streams()
+  waiting for them -- never starts, so manager reports
+  {"event": "process_not_running", "not_running": "{'modeld'}"}.
+
+  It is very easy to hit: a monitor whose bottom or right edge is flush with the
+  edge of the virtual screen (e.g. a 1920x1080 panel at +2560+360 on a
+  4480x1440 root) leaves zero slack, so a BeamNG window there that is moved down
+  even slightly -- or just carries a title bar -- extends past the root.
+
+  Clamping changes the captured aspect ratio a little, since the frame is
+  rescaled to the model's fixed 1928x1208 either way. That is a far better
+  failure mode than exiting, and it only applies while the window is genuinely
+  half off-screen.
+  """
+  left = max(region["left"], bounds["left"])
+  top = max(region["top"], bounds["top"])
+  right = min(region["left"] + region["width"], bounds["left"] + bounds["width"])
+  bottom = min(region["top"] + region["height"], bounds["top"] + bounds["height"])
+  if right - left < 2 or bottom - top < 2:
+    return None
+  return {"left": left, "top": top, "width": right - left, "height": bottom - top}
+
+
+def get_capture_region(sct: mss.MSS) -> tuple[dict, str | None]:
   """Explicit region > tracked window > whole monitor.
+
+  Returns (region, window_id). The id is None unless we're tracking a window;
+  the caller uses it to re-read that window's geometry cheaply instead of
+  re-running discovery, which is expensive (see the retrack block in main).
 
   Window tracking is the nicest option when it works (a windowed, moved or
   resized BeamNG still gets captured, and you keep a second monitor free for
   the openpilot UI), but it needs X11 and xdotool, so it degrades to a plain
   monitor grab rather than failing.
   """
+  bounds = sct.monitors[0]
+
   region_env = os.environ.get("BEAMPILOT_CAM_REGION")
   if region_env:
     left, top, width, height = (int(v) for v in region_env.split(","))
-    return {"left": left, "top": top, "width": width, "height": height}
+    asked = {"left": left, "top": top, "width": width, "height": height}
+    region = clamp_region(asked, bounds)
+    if region is None:
+      print(f"[beamcamd] BEAMPILOT_CAM_REGION {region_env!r} is entirely outside the screen"
+            + f" ({bounds['width']}x{bounds['height']}); ignoring it", flush=True)
+    else:
+      if region != asked:
+        print("[beamcamd] BEAMPILOT_CAM_REGION clamped to the screen ->"
+              + f" {region['width']}x{region['height']} at +{region['left']}+{region['top']}", flush=True)
+      return region, None
 
   match = os.environ.get("BEAMPILOT_CAM_WINDOW", "").strip()
   if match:
     win = find_window(match)
     if win is not None:
-      print(f"[beamcamd] tracking window {win['id']} ({win['name']!r}, matched by {win['how']}):"
-            + f" {win['width']}x{win['height']} at +{win['left']}+{win['top']}", flush=True)
-      return {k: win[k] for k in ("left", "top", "width", "height")}
-    print(f"[beamcamd] no window matching {match!r} found --"
-          + " is BeamNG running? falling back to monitor capture", flush=True)
+      region = clamp_region({k: win[k] for k in ("left", "top", "width", "height")}, bounds)
+      if region is not None:
+        print(f"[beamcamd] tracking window {win['id']} ({win['name']!r}, matched by {win['how']}):"
+              + f" {win['width']}x{win['height']} at +{win['left']}+{win['top']}", flush=True)
+        return region, win["id"]
+      print(f"[beamcamd] window {win['id']} is entirely off-screen; falling back to monitor capture", flush=True)
+    else:
+      print(f"[beamcamd] no window matching {match!r} found --"
+            + " is BeamNG running? falling back to monitor capture", flush=True)
 
   monitor_idx = int(os.environ.get("BEAMPILOT_CAM_MONITOR", "1"))
-  return sct.monitors[monitor_idx]
+  if monitor_idx >= len(sct.monitors):
+    print(f"[beamcamd] BEAMPILOT_CAM_MONITOR={monitor_idx} but only {len(sct.monitors) - 1}"
+          + " monitor(s) exist; using the primary", flush=True)
+    monitor_idx = 1
+  return dict(sct.monitors[monitor_idx]), None
 
 
-def resize_nearest(img: np.ndarray, out_h: int, out_w: int) -> np.ndarray:
-  # cv2.resize is SIMD-optimized C++ under the hood -- ~48x faster than a
-  # numpy fancy-indexing gather for the same nearest-neighbor result (exact
-  # pixel selection can differ by a fraction of a pixel from a hand-rolled
-  # formula due to rounding conventions; imperceptible for camera input).
-  return cv2.resize(img, (out_w, out_h), interpolation=cv2.INTER_NEAREST)
+class FrameEncoder:
+  """Captured BGRA -> the padded NV12 buffer VisionIPC expects, allocation-free.
+
+  Every intermediate is allocated once and rewritten in place. The obvious
+  version -- cv2 returning a fresh array per stage, then .tobytes() per stage --
+  churns ~25MB per frame, which at 20Hz is ~500MB/s of garbage. That doesn't
+  just cost the copies (measured 1.91ms vs 0.98ms per frame here); it drags
+  CPython's generational GC into a periodic gen-2 sweep whose pause lands on a
+  random frame, which is exactly the kind of intermittent hitch this pipeline
+  must not have. Byte-for-byte identical output to the allocating version.
+  """
+
+  def __init__(self, w: int, h: int, stride: int, y_height: int, uv_height: int, uv_offset: int, size: int):
+    self.w, self.h = w, h
+
+    # The VENUS-style padded layout get_nv12_info describes: a stride-wide Y
+    # plane of y_height rows, then a stride-wide interleaved UV plane. No
+    # existing helper in the repo builds this layout, only the tightly-packed
+    # one. The padding columns/rows are zeroed once here and never touched
+    # again -- only the w x h and (w x h/2) sub-rectangles change per frame.
+    self.out = np.zeros(size, dtype=np.uint8)
+    self.y_view = self.out[:uv_offset].reshape(y_height, stride)
+    self.uv_view = self.out[uv_offset:uv_offset + stride * uv_height].reshape(uv_height, stride)
+
+    self.small = np.empty((h, w, 4), dtype=np.uint8)
+    self.i420 = np.empty((h + h // 2, w), dtype=np.uint8)
+
+  def encode(self, bgra: np.ndarray) -> np.ndarray:
+    # Downsize BEFORE colour conversion, not after: the resize cost scales with
+    # the OUTPUT size, so shrinking first means the (much more expensive)
+    # colour conversion only ever touches the model's resolution instead of the
+    # full captured monitor. cv2.resize is SIMD-optimized C++ under the hood --
+    # ~48x faster than a numpy fancy-indexing gather for the same
+    # nearest-neighbour result.
+    cv2.resize(bgra, (self.w, self.h), dst=self.small, interpolation=cv2.INTER_NEAREST)
+
+    # cv2 has no direct BGRA->NV12 code, only planar I420/YV12, so convert to
+    # I420 (Y, then U, then V as separate blocks) and interleave U/V into NV12's
+    # single UV plane. Still much faster than a manual numpy BT.601
+    # implementation, and it takes BGRA directly, skipping a channel-reorder copy.
+    cv2.cvtColor(self.small, cv2.COLOR_BGRA2YUV_I420, dst=self.i420)
+
+    h, w = self.h, self.w
+    self.y_view[:h, :w] = self.i420[:h, :]
+    self.uv_view[:h // 2, 0:w:2] = self.i420[h:h + h // 4, :].reshape(h // 2, w // 2)
+    self.uv_view[:h // 2, 1:w:2] = self.i420[h + h // 4:h + h // 2, :].reshape(h // 2, w // 2)
+
+    # Returned as an ndarray, not bytes: VisionIpcServer.send takes a Cython
+    # typed memoryview (const unsigned char[:]), so it reads this buffer
+    # directly and a .tobytes() copy of ~4.8MB per frame is pure waste.
+    return self.out
 
 
-def bgra_to_nv12_tight(bgra: np.ndarray) -> bytes:
-  """BGRA -> tightly-packed NV12 (w*h Y bytes, then (h//2)*w interleaved UV
-  bytes, no row padding). cv2 has no direct BGRA->NV12 code, only planar
-  I420/YV12, so this converts to I420 (Y, then U, then V as separate blocks)
-  and interleaves U/V into NV12's single UV plane. Much faster than a manual
-  numpy BT.601 implementation (SIMD-optimized C++ under the hood) and skips
-  the separate BGRA->RGB channel-reorder copy entirely, since cv2 takes BGRA
-  directly."""
-  h, w = bgra.shape[:2]
-  i420 = cv2.cvtColor(bgra, cv2.COLOR_BGRA2YUV_I420)
-  y = i420[:h, :]
-  u = i420[h:h + h // 4, :].reshape(h // 2, w // 2)
-  v = i420[h + h // 4:h + h // 2, :].reshape(h // 2, w // 2)
+class FramePacer:
+  """Fixed-rate pacing that DROPS a backlog instead of sprinting to clear it.
 
-  uv = np.empty((h // 2, w), dtype=np.uint8)
-  uv[:, 0::2] = u
-  uv[:, 1::2] = v
+  openpilot's Ratekeeper is deliberately not used here. It advances its
+  deadline by exactly one interval per call with no resync, so after one long
+  frame (a 68ms rediscovery, a compositor stall) its deadline is already in the
+  past and it sleeps zero for every frame until it has caught up. At 20Hz a
+  single 285ms hiccup therefore emits ~6 frames back-to-back, ~13ms apart, each
+  with an honest monotonic timestamp. modeld consumes them as fast as they
+  arrive, so the model's temporal context sees the world lurch forward and then
+  stall -- the stutter shows up in the driving, not just in a log.
 
-  return y.tobytes() + uv.tobytes()
+  Frames we are already too late to deliver on time are worthless (the screen
+  has moved on), so when we fall more than one full interval behind we abandon
+  the backlog and re-phase to now. Small overruns still self-correct normally.
+  """
 
+  def __init__(self, rate_hz: float):
+    self.interval = 1.0 / rate_hz
+    self.next_frame = time.monotonic() + self.interval
+    self.dropped = 0
 
-def pack_nv12_padded(nv12_bytes: bytes, w: int, h: int, stride: int, y_height: int, uv_height: int, uv_offset: int, size: int) -> bytes:
-  """Places a tightly-packed NV12 buffer (as produced by bgra_to_nv12_tight:
-  w*h Y bytes then (h//2)*w interleaved UV bytes, no row padding) into the
-  strided/padded VENUS-style buffer layout get_nv12_info describes -- no
-  existing helper in the repo handles this padded layout, only the
-  tightly-packed one."""
-  out = np.zeros(size, dtype=np.uint8)
+  def reset(self) -> None:
+    """Re-phase to now without counting a drop."""
+    self.next_frame = time.monotonic() + self.interval
 
-  y_plane = np.frombuffer(nv12_bytes, dtype=np.uint8, count=w * h).reshape(h, w)
-  uv_plane = np.frombuffer(nv12_bytes, dtype=np.uint8, count=(h // 2) * w, offset=w * h).reshape(h // 2, w)
-
-  y_view = out[:uv_offset].reshape(y_height, stride)
-  y_view[:h, :w] = y_plane
-
-  uv_view = out[uv_offset:uv_offset + stride * uv_height].reshape(uv_height, stride)
-  uv_view[:h // 2, :w] = uv_plane
-
-  return out.tobytes()
+  def wait(self) -> None:
+    remaining = self.next_frame - time.monotonic()
+    if remaining > 0:
+      time.sleep(remaining)
+      self.next_frame += self.interval
+    elif -remaining > self.interval:
+      self.dropped += 1
+      # Worth surfacing: in steady state this should never fire, so if it does
+      # the machine is not keeping up with capture + game + model and that is
+      # the thing to fix, not the pacing. Rate-limited so it can't itself
+      # become the stall.
+      if self.dropped == 1 or self.dropped % 100 == 0:
+        print(f"[beamcamd] behind by {-remaining * 1000:.0f}ms, resyncing"
+              + f" (dropped {self.dropped} frame slots so far)", flush=True)
+      self.next_frame = time.monotonic() + self.interval
+    else:
+      self.next_frame += self.interval
 
 
 def main():
@@ -140,42 +244,105 @@ def main():
   if not usable:
     print("[beamcamd] cannot capture the screen; frames will be blank", flush=True)
 
-  sct = mss.mss()
-  region = get_capture_region(sct)
+  sct = mss.MSS()
+  region, tracked_id = get_capture_region(sct)
+  encoder = FrameEncoder(W, H, stride, y_height, uv_height, uv_offset, size)
 
-  rate = Ratekeeper(CAMERA_RATE_HZ, print_delay_threshold=None)
+  # Everything that lives for the whole run is allocated by now, so promote it
+  # out of the GC's reach and stop collecting. On a soft-realtime loop the cycle
+  # collector only buys periodic pauses that land on a random frame. openpilot
+  # does the same for its own realtime processes (common/realtime.py's
+  # config_realtime_process).
+  #
+  # Safe because the steady-state loop creates no reference cycles: the only
+  # per-frame Python objects are the capnp messages, and they are refcounted
+  # away immediately. Verified rather than assumed -- 40,000 publish iterations
+  # (~33 min at 20Hz) with the collector off showed no RSS growth at all and a
+  # following gc.collect() freed zero cycle objects.
+  gc.collect()
+  gc.freeze()
+  gc.disable()
+
+  pacer = FramePacer(CAMERA_RATE_HZ)
   frame_id = 0
 
-  # When tracking a window, re-read its geometry occasionally so moving or
-  # resizing the game (or alt-tabbing it fullscreen) doesn't leave us grabbing
-  # a stale rectangle. Every 2s rather than every frame: xdotool is a process
-  # spawn, which is far too expensive at 20Hz.
   track_window = bool(os.environ.get("BEAMPILOT_CAM_WINDOW", "").strip()) and \
                  not os.environ.get("BEAMPILOT_CAM_REGION")
   last_retrack = time.monotonic()
+  # Set when a grab fails or the tracked window vanishes: the next retrack tick
+  # runs full discovery instead of the cheap geometry re-read.
+  need_rediscover = False
+  grab_errors = 0
 
   while True:
-    if track_window and (time.monotonic() - last_retrack) > RETRACK_INTERVAL_S:
-      last_retrack = time.monotonic()
-      win = find_window(os.environ.get("BEAMPILOT_CAM_WINDOW", "").strip())
-      if win is not None:
-        new_region = {k: win[k] for k in ("left", "top", "width", "height")}
-        if new_region != region:
-          print(f"[beamcamd] window moved/resized -> {new_region['width']}x{new_region['height']}"
-                + f" at +{new_region['left']}+{new_region['top']}", flush=True)
-          region = new_region
+    now = time.monotonic()
+    if (track_window or need_rediscover) and (now - last_retrack) > RETRACK_INTERVAL_S:
+      last_retrack = now
 
-    shot = sct.grab(region)
-    bgra = np.frombuffer(shot.raw, dtype=np.uint8).reshape(shot.height, shot.width, 4)
-    # Downsize BEFORE color conversion, not after: resize_nearest's
-    # fancy-indexing cost is ~proportional to the OUTPUT size regardless of
-    # channel count, so shrinking first means cv2 only has to touch the (much
-    # smaller) target resolution instead of the full captured monitor
-    # resolution. Fancy indexing always returns a fresh contiguous array, so
-    # bgra_small is already safe to hand straight to cv2.
-    bgra_small = resize_nearest(bgra, H, W)
+      # The cheap path: re-read the geometry of the window we ALREADY found, by
+      # id, so moving or resizing the game doesn't leave us grabbing a stale
+      # rectangle. Measured on this machine: window_geometry() on a known id is
+      # a single xdotool call at ~0.7ms, while find_window() is 68ms+ (it shells
+      # out to pgrep/xdotool/xprop once per candidate) -- more than a whole 50ms
+      # frame budget, so running discovery on a timer guaranteed a dropped frame
+      # every RETRACK_INTERVAL_S. That was the periodic stutter.
+      new_region = None
+      if tracked_id is not None and not need_rediscover:
+        geo = window_geometry(tracked_id)
+        if geo is not None:
+          new_region = clamp_region(geo, sct.monitors[0])
 
-    nv12_bytes = pack_nv12_padded(bgra_to_nv12_tight(bgra_small), W, H, stride, y_height, uv_height, uv_offset, size)
+      if new_region is None:
+        # The window is gone (closed, or the game restarted), or a grab just
+        # failed. Only now is full rediscovery worth its cost; it also drops us
+        # back to monitor capture if nothing matches, rather than freezing on a
+        # stale rectangle. Rebuild the MSS connection too: it re-reads the
+        # monitor layout, which the old object caches, and recovers a
+        # connection broken by an X server hiccup.
+        try:
+          sct.close()
+        except Exception:
+          pass
+        sct = mss.MSS()
+        region, tracked_id = get_capture_region(sct)
+        need_rediscover = False
+      elif new_region != region:
+        print(f"[beamcamd] window moved/resized -> {new_region['width']}x{new_region['height']}"
+              + f" at +{new_region['left']}+{new_region['top']}", flush=True)
+        region = new_region
+
+    # A failed grab must never kill the daemon -- see clamp_region's docstring
+    # for what taking beamcamd down does to the rest of the stack. Clamping
+    # prevents the common out-of-bounds case, but the window can still move
+    # between the clamp and the grab, and the X server can fail a request for
+    # reasons of its own, so this stays guarded. XProtoError subclasses
+    # mss.exception.ScreenShotError, so that one catch covers both the X
+    # protocol errors and mss's own (e.g. a zero-size region).
+    #
+    # Only the grab is guarded: an exception out of encode() would be a bug in
+    # our own buffer arithmetic, and swallowing that would just hide it.
+    shot = None
+    try:
+      shot = sct.grab(region)
+    except mss.exception.ScreenShotError as e:
+      grab_errors += 1
+      need_rediscover = True
+      # Rate-limited: a persistently bad region would otherwise print at 20Hz.
+      if grab_errors == 1 or grab_errors % 200 == 0:
+        print(f"[beamcamd] screen grab failed ({type(e).__name__}: {e}); region was {region}."
+              + f" [{grab_errors} in a row] Re-finding the window;"
+              + " republishing the last frame meanwhile.", flush=True)
+    else:
+      grab_errors = 0
+
+    if shot is not None:
+      bgra = np.frombuffer(shot.raw, dtype=np.uint8).reshape(shot.height, shot.width, 4)
+      nv12 = encoder.encode(bgra)
+    else:
+      # Keep publishing the last good frame at the normal rate rather than
+      # going quiet: openpilot registers commIssue as both NO_ENTRY and
+      # SOFT_DISABLE, so a gap in the camera stream disengages it mid-drive.
+      nv12 = encoder.out
 
     # Real monotonic-clock timestamp, matching cereal's own logMonoTime
     # (time.monotonic()) -- NOT a synthetic frame_id*dt counter. modeld derives
@@ -198,8 +365,8 @@ def main():
     # end-to-end longitudinal policy leans much harder on wide-camera scene
     # understanding. Fixing this properly needs a second BeamNG camera at a
     # genuinely wide FOV published to VISION_STREAM_WIDE_ROAD.
-    server.send(VisionStreamType.VISION_STREAM_WIDE_ROAD, nv12_bytes, frame_id, timestamp, timestamp)
-    server.send(VisionStreamType.VISION_STREAM_NARROW_ROAD, nv12_bytes, frame_id, timestamp, timestamp)
+    server.send(VisionStreamType.VISION_STREAM_WIDE_ROAD, nv12, frame_id, timestamp, timestamp)
+    server.send(VisionStreamType.VISION_STREAM_NARROW_ROAD, nv12, frame_id, timestamp, timestamp)
 
     # update cereal (wide road)
     dat = messaging.new_message("wideRoadCameraState", valid=True)
@@ -216,8 +383,15 @@ def main():
     # update frame count / id
     frame_id += 1
 
+    # The first frame pays for one-time lazy initialisation (cv2 loading its
+    # kernels, the first VisionIPC send) and reliably overruns. That is not a
+    # pacing failure, so start the clock properly once it's out of the way
+    # rather than reporting a dropped slot on every single launch.
+    if frame_id == 1:
+      pacer.reset()
+
     # wait for 20hz
-    rate.keep_time()
+    pacer.wait()
 
 if __name__ == "__main__":
   main()

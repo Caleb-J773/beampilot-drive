@@ -120,6 +120,93 @@ export HSA_ENABLE_DXG_DETECTION=1
 # export USE_AMD=1
 export USE_NV="1"
 
+# --- which GPU tinygrad uses --------------------------------------------
+# tinygrad's NV and AMD backends are NOT CUDA/ROCm: they drive the card through
+# raw ioctls, and each supports only a limited range of hardware. Picking the
+# wrong card is not a graceful failure -- modeld dies during model load and
+# manager reports {"event": "process_not_running", "not_running": "{'modeld'}"}
+# with nothing else obviously wrong, so nothing drives.
+#
+#   NV  -- ops_nv.py's setup_usermode looks up BLACKWELL/AMPERE_CHANNEL_GPFIFO_A,
+#          ADA/AMPERE_COMPUTE_B, etc. On anything older than Ampere those are
+#          bare next() calls over an empty generator, so the failure surfaces as
+#          an unexplained `StopIteration` deep in ops_nv.py. Needs compute
+#          capability >= 8.0.
+#   AMD -- ops_amd.py asserts the target is gfx942, gfx950, or gfx11xx/gfx12xx
+#          ("Unsupported arch: gfxNNNN" otherwise), and needs the user in the
+#          `render` group for /dev/kfd.
+#
+# This bites on any mixed-GPU machine. Here, a GTX 1660 SUPER (Turing, compute
+# 7.5) enumerates as NVIDIA index 0 and the RTX 3060 (Ampere, 8.6) as index 1,
+# so tinygrad's default of index 0 cannot work.
+#
+# So detect the first *usable* card rather than assuming index 0, and detect it
+# rather than hardcoding, because enumeration follows the PCI bus and shifts
+# when cards are reseated. tinygrad's syntax is DEV=":<index>+<BACKEND>" -- the
+# index goes BEFORE the '+', so ":1+NV" means "NV restricted to physical GPU 1".
+# The selected card then becomes index 0 inside tinygrad.
+# Override either backend by exporting BEAMPILOT_GPU_INDEX before running this.
+
+# First KFD node that tinygrad's AMD backend actually supports. The index must
+# count only nodes with a nonzero gpu_id, in numeric node order, because that is
+# exactly the list ops_amd.py builds (_is_usable_gpu + sorted) and indexes into
+# -- the CPU node is node 0 and must not shift the numbering.
+_bp_amd_gpu_index() {
+  _topo=/sys/devices/virtual/kfd/kfd/topology/nodes
+  [ -d "$_topo" ] || return 1
+  _idx=-1
+  for _n in $(ls "$_topo" 2>/dev/null | sort -n); do
+    [ "$(cat "$_topo/$_n/gpu_id" 2>/dev/null || echo 0)" != "0" ] || continue
+    _idx=$((_idx + 1))
+    _ver=$(awk '/^gfx_target_version/{print $2; exit}' "$_topo/$_n/properties" 2>/dev/null)
+    [ -n "$_ver" ] && [ "$_ver" -gt 0 ] 2>/dev/null || continue
+    # gfx_target_version 100306 -> (10,3,6) -> gfx1036
+    _maj=$((_ver / 10000)); _min=$(((_ver / 100) % 100)); _stp=$((_ver % 100))
+    if [ "$_maj" -eq 11 ] || [ "$_maj" -eq 12 ] \
+       || { [ "$_maj" -eq 9 ] && [ "$_min" -eq 4 ] && [ "$_stp" -eq 2 ]; } \
+       || { [ "$_maj" -eq 9 ] && [ "$_min" -eq 5 ] && [ "$_stp" -eq 0 ]; }; then
+      echo "$_idx"; return 0
+    fi
+  done
+  return 1
+}
+
+if [ -z "${DEV}" ]; then
+  if [ "${USE_NV}" = "1" ]; then
+    if [ -z "${BEAMPILOT_GPU_INDEX}" ] && command -v nvidia-smi >/dev/null 2>&1; then
+      # First GPU with compute capability >= 8.0. awk rather than sort, so the
+      # lowest usable index wins and NVIDIA's own ordering is preserved.
+      BEAMPILOT_GPU_INDEX="$(nvidia-smi --query-gpu=index,compute_cap --format=csv,noheader 2>/dev/null \
+        | awk -F', *' '{ if ($2 + 0 >= 8.0) { print $1; exit } }')"
+    fi
+    if [ -n "${BEAMPILOT_GPU_INDEX}" ]; then
+      export DEV=":${BEAMPILOT_GPU_INDEX}+NV"
+      echo "[beampilot] tinygrad NV -> GPU ${BEAMPILOT_GPU_INDEX} (DEV=${DEV})"
+    else
+      echo "[beampilot] WARNING: no Ampere-or-newer NVIDIA GPU found (tinygrad's NV backend" \
+           "needs compute capability >= 8.0). modeld will fail at model load with a" \
+           "StopIteration in ops_nv.py. Set BEAMPILOT_GPU_INDEX to override." >&2
+    fi
+  elif [ "${USE_AMD}" = "1" ]; then
+    [ -n "${BEAMPILOT_GPU_INDEX}" ] || BEAMPILOT_GPU_INDEX="$(_bp_amd_gpu_index)"
+    if [ -n "${BEAMPILOT_GPU_INDEX}" ]; then
+      export DEV=":${BEAMPILOT_GPU_INDEX}+AMD"
+      echo "[beampilot] tinygrad AMD -> GPU ${BEAMPILOT_GPU_INDEX} (DEV=${DEV})"
+    else
+      echo "[beampilot] WARNING: no AMD GPU that tinygrad supports (needs gfx942, gfx950," \
+           "or gfx11xx/gfx12xx). modeld will fail with 'Unsupported arch'." \
+           "Set BEAMPILOT_GPU_INDEX to override, or USE_NV=1 for an NVIDIA card." >&2
+    fi
+    # /dev/kfd is render-group owned; without it every AMD device open fails.
+    if ! id -nG 2>/dev/null | tr ' ' '\n' | grep -qx render; then
+      echo "[beampilot] WARNING: $(id -un) is not in the 'render' group, so /dev/kfd is not" \
+           "accessible and the AMD backend cannot open the GPU." \
+           "Fix with: sudo usermod -aG render $(id -un)  (then log out and back in)" >&2
+    fi
+  fi
+fi
+unset -f _bp_amd_gpu_index 2>/dev/null || true
+
 # tici (c3 big) vs mici (c4 small)
 # do 1 for tici, 0 for mici
 # NOTE: this isn't a UI scale knob -- it's a hard resolution switch in
