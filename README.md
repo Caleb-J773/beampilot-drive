@@ -124,7 +124,8 @@ source .venv/bin/activate.fish   # bash/zsh: source .venv/bin/activate
 ./launch_beampilot.sh
 ```
 
-You get a five-second countdown to alt-tab back into the game. Get above ~20 mph and press `i`.
+Startup takes a while, which is plenty of time to tab back into the game. Once it's up, get above
+~20 mph and press `i`. (Set `BEAMPILOT_LAUNCH_DELAY=5` if you'd rather have a countdown first.)
 
 <div align="center">
 

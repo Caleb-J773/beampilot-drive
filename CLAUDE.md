@@ -54,7 +54,7 @@ CAN only flows **into** openpilot (fake sensors), never back into the game.
 
 ```bash
 source .venv/bin/activate.fish     # fish shell -- NOT bin/activate
-./launch_beampilot.sh              # 5s countdown to tab into BeamNG
+./launch_beampilot.sh              # BEAMPILOT_LAUNCH_DELAY=5 for a countdown first
 ```
 
 Cruise buttons are read from the **physical keyboard** via evdev (BeamNG has focus, so this

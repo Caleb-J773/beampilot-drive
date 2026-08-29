@@ -36,12 +36,20 @@ import os
 Params().put('LongitudinalPersonality', int(os.environ.get('BEAMPILOT_PERSONALITY', '1')), block=True)
 "
 
-echo ""
-echo ">>> Switch to the BeamNG.drive window now -- starting in 5 seconds <<<"
-for i in 5 4 3 2 1; do
-  echo "  $i..."
-  sleep 1
-done
+# Optional countdown before handing off, to give you time to tab into BeamNG.
+# Off by default: the build and process startup take long enough on their own
+# that there's no window to miss. Set BEAMPILOT_LAUNCH_DELAY to a number of
+# seconds if you want one.
+delay="${BEAMPILOT_LAUNCH_DELAY:-0}"
+if [ "$delay" -gt 0 ] 2>/dev/null; then
+  echo ""
+  echo ">>> Switch to the BeamNG.drive window now -- starting in ${delay}s <<<"
+  while [ "$delay" -gt 0 ]; do
+    echo "  $delay..."
+    sleep 1
+    delay=$((delay - 1))
+  done
+fi
 
 echo "Starting..."
 exec ./launch_chffrplus.sh
