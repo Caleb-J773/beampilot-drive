@@ -191,6 +191,11 @@ These were each a real bug that cost significant debugging time. Don't regress t
   struct turns "old mod, no BSM" into "old mod, no telemetry at all".
 - **A stale BSM feed must fail to *clear*, not to *blocked*.** A latched warning blocks every
   lane change for the rest of the drive with nothing on screen to explain it. 0.5s timeout.
+- **capnp lists are NOT Python lists.** They support `len()` and integer indexing but not
+  slicing, and a plain list supports all three -- so a test written against lists passes while
+  the real thing raises `TypeError` on its first frame. That is exactly how the curve limiter
+  took plannerd down. Anything consuming `modelV2` arrays must be tested against a real
+  `messaging.new_message('modelV2').as_reader()`, not a hand-built list.
 - **Stock openpilot never slows down FOR a corner.** It caps acceleration once already cornering
   (`a_x = sqrt(a_total^2 - a_y^2)`) but the cruise path just holds the setpoint. Curve braking is
   beampilot's (`beampilot_curve.py`), offered to `longitudinal_planner`'s `candidates` list so

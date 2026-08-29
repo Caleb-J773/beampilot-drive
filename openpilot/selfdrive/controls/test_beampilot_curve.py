@@ -153,6 +153,59 @@ class TestLimiter(unittest.TestCase):
       self.limiter.update(30.0, *path, T_IDXS)
 
 
+class TestAgainstRealModelData(unittest.TestCase):
+  """The model's arrays are capnp lists, not Python lists.
+
+  capnp lists support len() and integer indexing but NOT slicing, and a plain
+  Python list supports all three -- so every other test in this file passed
+  while the real thing raised TypeError on its first frame and took plannerd
+  down with it. Anything consuming modelV2 has to be exercised against the
+  actual message type.
+  """
+
+  def model(self, yaw_rate=0.2, speed=30.0):
+    from openpilot.cereal import messaging
+    msg = messaging.new_message('modelV2')
+    n = len(T_IDXS)
+    msg.modelV2.velocity = {'x': [speed] * n, 'y': [0.0] * n, 'z': [0.0] * n, 't': list(T_IDXS)}
+    msg.modelV2.orientationRate = {'x': [0.0] * n, 'y': [0.0] * n, 'z': [yaw_rate] * n,
+                                   't': list(T_IDXS)}
+    msg.modelV2.position = {'x': [speed * t for t in T_IDXS], 'y': [0.0] * n, 'z': [0.0] * n,
+                            't': list(T_IDXS)}
+    return msg.as_reader().modelV2
+
+  def test_curvatures_from_a_capnp_message(self):
+    model = self.model(yaw_rate=0.3, speed=30.0)
+    curvatures = bc.path_curvatures(model.velocity.x, model.orientationRate.z)
+    self.assertEqual(len(curvatures), len(T_IDXS))
+    self.assertAlmostEqual(curvatures[0], 0.3 / 30.0, places=6)
+
+  def test_the_limiter_runs_on_a_capnp_message(self):
+    model = self.model(yaw_rate=0.25)
+    limiter = bc.CurveSpeedLimiter(DT_MDL)
+    previous, accel = bc.CURVE_SLOWDOWN, None
+    bc.CURVE_SLOWDOWN = True
+    try:
+      for _ in range(20):
+        accel = limiter.update(30.0, model.position.x, model.velocity.x,
+                               model.orientationRate.z, T_IDXS)
+    finally:
+      bc.CURVE_SLOWDOWN = previous
+    self.assertIsNotNone(accel)
+    self.assertLess(accel, 0.0)
+
+  def test_a_straight_capnp_path_asks_for_nothing(self):
+    model = self.model(yaw_rate=0.0)
+    limiter = bc.CurveSpeedLimiter(DT_MDL)
+    previous = bc.CURVE_SLOWDOWN
+    bc.CURVE_SLOWDOWN = True
+    try:
+      self.assertIsNone(limiter.update(30.0, model.position.x, model.velocity.x,
+                                       model.orientationRate.z, T_IDXS))
+    finally:
+      bc.CURVE_SLOWDOWN = previous
+
+
 class TestDefaults(unittest.TestCase):
   def test_the_target_sits_below_the_hard_lateral_limit(self):
     # Arriving at exactly the limit leaves clip_curvature saturated for the

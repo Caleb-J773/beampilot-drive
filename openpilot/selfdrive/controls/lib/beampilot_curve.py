@@ -74,13 +74,20 @@ def required_accel(v_ego: float, v_target: float, distance: float) -> float:
   return (v_target ** 2 - v_ego ** 2) / (2.0 * max(distance, MIN_DISTANCE))
 
 
-def path_curvatures(velocity_x, orientation_rate_z):
+def path_curvatures(velocity_x, orientation_rate_z, points: int | None = None):
   """Geometric curvature (1/m) along the model's predicted path.
 
   yaw rate over speed, not the steering angle: curvature is a property of the
   road, so it stays valid after we decide to arrive more slowly.
+
+  Indexed rather than sliced or zipped. These arrive as capnp lists, which
+  support len() and integer indexing but NOT slicing -- and a plain Python list
+  supports all three, so a test written against lists cannot tell the
+  difference. It raised TypeError on the first real frame.
   """
-  return [rate / max(speed, 0.1) for speed, rate in zip(velocity_x, orientation_rate_z, strict=False)]
+  if points is None:
+    points = min(len(velocity_x), len(orientation_rate_z))
+  return [orientation_rate_z[i] / max(velocity_x[i], 0.1) for i in range(points)]
 
 
 class CurveSpeedLimiter:
@@ -115,7 +122,7 @@ class CurveSpeedLimiter:
       self.reset()
       return None
 
-    curvatures = path_curvatures(velocity_x[:points], orientation_rate_z[:points])
+    curvatures = path_curvatures(velocity_x, orientation_rate_z, points)
     plan_floor = max(MIN_DISTANCE, v_ego * CURVE_MIN_PLAN_S)
     worst = None
     tightest_speed = float("inf")
