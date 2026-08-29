@@ -53,7 +53,6 @@ CAN only flows **into** openpilot (fake sensors), never back into the game.
 ## Running
 
 ```bash
-cd /home/caleb/Pictures/beampilot
 source .venv/bin/activate.fish     # fish shell -- NOT bin/activate
 ./launch_beampilot.sh              # 5s countdown to tab into BeamNG
 ```
