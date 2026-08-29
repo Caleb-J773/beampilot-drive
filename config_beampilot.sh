@@ -65,7 +65,7 @@ export BEAMPILOT_CALIBRATION="instant"
 #          on the X server. Needs gst-launch-1.0 with the pipewire plugin and a
 #          working xdg-desktop-portal.
 #   x11    force the classic grab.
-# export BEAMPILOT_CAPTURE_BACKEND="portal"
+export BEAMPILOT_CAPTURE_BACKEND="portal"
 
 export BEAMPILOT_CAM_WINDOW="beamng"
 # export BEAMPILOT_CAM_MONITOR="1"
