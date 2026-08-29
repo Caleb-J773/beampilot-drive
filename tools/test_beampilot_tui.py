@@ -280,6 +280,123 @@ class TheShippedConfigAgreesWithItself(unittest.TestCase):
     self.assertFalse(pinned, "config pins values the code already defaults to:\n" + "\n".join(pinned))
 
 
+class FakeScreen:
+  """Small curses stand-in used to exercise the responsive renderer."""
+  def __init__(self, height, width, keys=None):
+    self.height = height
+    self.width = width
+    self.keys = list(keys or [])
+    self.clear()
+
+  def clear(self):
+    self.grid = [[" "] * self.width for _ in range(self.height)]
+
+  def getmaxyx(self):
+    return self.height, self.width
+
+  def addstr(self, y, x, text, _attr=0):
+    for offset, char in enumerate(text):
+      if 0 <= y < self.height and 0 <= x + offset < self.width:
+        self.grid[y][x + offset] = char
+
+  def refresh(self):
+    pass
+
+  def getch(self):
+    return self.keys.pop(0)
+
+  def text(self):
+    return "\n".join("".join(row).rstrip() for row in self.grid)
+
+
+def layout_editor(screen=None):
+  editor = tui.Tui.__new__(tui.Tui)
+  editor.stdscr = screen
+  editor.sections = [
+    tui.Section("First", "The first group.", [
+      tui.Setting("ONE", "First switch", "First help text.", "0", choices=["0", "1"]),
+      tui.Setting("TWO", "Second value", "Searchable needle in help.", "2", numeric=True),
+    ]),
+    tui.Section("Second", "The second group.", [
+      tui.Setting("THREE", "Third setting", "Third help text.", "plain"),
+    ]),
+  ]
+  editor.defaults = {"ONE": "0", "TWO": "2", "THREE": "plain"}
+  editor.values = dict(editor.defaults)
+  editor.on_disk = dict(editor.values)
+  editor.in_file = set()
+  editor.rows = editor.flatten()
+  editor.cursor = next(i for i, row in enumerate(editor.rows) if row[0] == "setting")
+  editor.scroll = 0
+  editor.status = ""
+  editor.dirty = False
+  editor.quit_armed = False
+  editor.gpu_summary = "test GPU"
+  return editor
+
+
+class LayoutAndNavigation(unittest.TestCase):
+  def setUp(self):
+    self.real_color_pair = tui.curses.color_pair
+    tui.curses.color_pair = lambda _index: 0
+    self.addCleanup(setattr, tui.curses, "color_pair", self.real_color_pair)
+
+  def test_up_and_down_stay_in_the_visible_section(self):
+    editor = layout_editor()
+    editor.move(-1)
+    self.assertEqual(editor.current().key, "TWO")
+    editor.move(1)
+    self.assertEqual(editor.current().key, "ONE")
+
+  def test_sections_are_explicit_and_wrap(self):
+    editor = layout_editor()
+    editor.select_section(1)
+    self.assertEqual(editor.current().key, "THREE")
+    editor.move_section(1)
+    self.assertEqual(editor.current().key, "ONE")
+
+  def test_find_includes_the_help_text_and_opens_its_section(self):
+    editor = layout_editor()
+    editor.select_section(1)
+    editor.prompt = lambda _label: "needle"
+    editor.find()
+    self.assertEqual(editor.current().key, "TWO")
+    self.assertEqual(editor.active_section().name, "First")
+
+  def test_source_labels_distinguish_default_pinned_custom_and_unsaved(self):
+    editor = layout_editor()
+    setting = editor.current()
+    self.assertEqual(editor.source_label(setting), "code default")
+    editor.in_file.add("ONE")
+    self.assertEqual(editor.source_label(setting), "pinned default")
+    editor.values["ONE"] = "1"
+    editor.on_disk["ONE"] = "1"
+    self.assertEqual(editor.source_label(setting), "custom")
+    editor.values["ONE"] = "0"
+    self.assertEqual(editor.source_label(setting), "● unsaved")
+
+  def test_wide_layout_has_sidebar_and_narrow_layout_does_not(self):
+    wide = FakeScreen(24, 120)
+    editor = layout_editor(wide)
+    editor.draw()
+    self.assertIn("SECTIONS", wide.text())
+    self.assertIn("SOURCE", wide.text())
+    self.assertIn("First switch", wide.text())
+
+    narrow = FakeScreen(18, 60)
+    editor.stdscr = narrow
+    editor.draw()
+    self.assertNotIn("SECTIONS", narrow.text())
+    self.assertIn("1/2  FIRST", narrow.text())
+    self.assertIn("q quit", narrow.text())
+
+  def test_small_terminal_gets_a_clear_resize_message(self):
+    screen = FakeScreen(10, 40)
+    editor = layout_editor(screen)
+    editor.draw()
+    self.assertIn("Terminal too small", screen.text())
+
+
 class TheReadmeAgreesToo(unittest.TestCase):
   """The settings tables in the README are the third copy of these numbers."""
 

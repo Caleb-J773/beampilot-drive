@@ -186,17 +186,19 @@ uv run python tools/beampilot_tui.py
 
 Groups all 71 settings under Hardware / Car / Driving limits / Controls / Blind spot / Radar /
 Camera / Alerts / Bridge, with an explanation of each and what the stock openpilot value is.
-Detects your GPUs via `nvidia-smi` and `lspci` and only offers backends this machine has.
+Only one section is open at a time, so the current category and its help stay visible. Wide
+terminals get a numbered section sidebar with per-section custom-value counts; narrower terminals
+use the same layout without the sidebar. Detects your GPUs via `nvidia-smi` and `lspci` and only
+offers backends this machine has.
 
 Every row shows three things: the setting, its value, and where that value came from.
 On/off settings read as `on`/`off` rather than `1`/`0`. The right-hand column says either
-`default` — nothing in the config, so whatever the code decides — or `set · default X`, meaning
-the config pins it and overrides `X`. Settings with consequences (like
-`BEAMPILOT_IGNORE_COMM_ISSUE`) turn that column yellow.
+`code default`, `pinned default`, `custom`, or `unsaved`; the detail pane below shows the exact
+environment key, current value, default, longer explanation, and any warning.
 
 `↑↓` move, `←→`/`enter` change, `d` puts one back to its default, `tab` jumps between sections,
-`/` finds a setting by name, `s` saves, `r` runs setup, `L` launches, `m` opens the monitor,
-`q` quits.
+`1`-`9` opens a section directly, `/` finds a setting by name or description, `s` saves, `r` runs
+setup, `L` launches, `m` opens the monitor, `q` quits.
 
 `config_beampilot.sh` remains the source of truth. The TUI rewrites only the `export` lines it
 manages and preserves everything around them, including trailing inline comments. Editing the

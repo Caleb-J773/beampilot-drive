@@ -7,8 +7,9 @@ config edited by hand shows up correctly the next time this runs.
 
   uv run python tools/beampilot_tui.py
 
-Arrow keys / j / k to move, Enter or space to change a setting, s to save,
-r to run setup, L to launch, m to open the monitor, q to quit.
+Arrow keys / j / k to move, Enter or space to change a setting, Tab or 1-9 to
+change section, s to save, r to run setup, L to launch, m to open the monitor,
+q to quit.
 """
 import curses
 import os
@@ -168,326 +169,275 @@ def build_sections() -> list[Section]:
   devices = gpu_list()
   device_choices = [str(i) for i in range(max(len(devices), 1))]
   caps = dict(nvidia_compute_caps())
-  device_help = ("Which physical GPU runs the model, if you have more than one: "
+  device_help = ("Select the GPU used for model inference: "
                  + (", ".join(f"[{i}] {n}" + (f" (compute {caps[str(i)]:g})" if str(i) in caps else "")
                               for i, n in enumerate(devices)) if devices else "none detected")
-                 + ". Same numbering as nvidia-smi for every backend. Blank auto-detects the"
-                 + " first card the chosen backend can actually drive."
-                 + " BUILD-time -- re-run setup after changing.")
+                 + ". Indices match nvidia-smi. Auto selects the first compatible device."
+                 + " Re-run setup after changing this build-time setting.")
   return [
-    Section("Hardware", "What this machine has, and which model to run.", [
+    Section("Hardware", "Model, GPU, and interface display settings.", [
       Setting("BEAMPILOT_GPU", "GPU backend",
-              "Which tinygrad backend runs the driving model. nvidia and amd are tinygrad's own"
-              + " drivers -- fastest, but nvidia needs compute 8.0 (Ampere) or newer and amd needs"
-              + " gfx11xx/gfx12xx/gfx942/gfx950; an older card does not run slowly, it dies at"
-              + " model load. cuda is the compatibility option for a pre-Ampere NVIDIA card"
-              + " (works back to Maxwell, tensor cores and all). opencl is the widest net, any"
-              + " vendor, but tinygrad's OpenCL has no tensor cores -- fine for the standard"
-              + " model, costly for chestnut. Only backends this machine can use are offered."
-              + " BUILD-time -- re-run setup after changing.",
+              "Select the tinygrad inference backend. nvidia requires an Ampere-or-newer NVIDIA"
+              + " GPU; amd supports the listed modern AMD architectures. Use cuda for older"
+              + " NVIDIA GPUs, or opencl for broader compatibility. Only detected-compatible"
+              + " options are shown. Re-run setup after changing this build-time setting.",
               gpus[0], choices=gpus,
               warn="build-time setting -- rebuild for this to take effect"),
       Setting("BEAMPILOT_GPU_INDEX", "GPU device", device_help, "", choices=[""] + device_choices,
               value_labels={"": "auto"},
               warn="build-time setting -- rebuild for this to take effect"),
       Setting("CHESTNUT", "Chestnut model",
-              "Larger, better-driving model. Needs 8GB+ VRAM (standard needs 4GB).",
+              "Use the larger Chestnut model. Requires at least 8 GB of VRAM; the standard model"
+              + " requires about 4 GB.",
               "0", choices=["0", "1"]),
       Setting("BIG", "Window size",
-              "1 = comma 3/3X window (2160x1080). 0 = comma 4 (536x240) -- tiny on a desktop."
-              + " Window scale below resizes whichever of the two you pick.",
+              "Select the base interface resolution. Window scale applies after this selection.",
               "1", choices=["1", "0"],
               value_labels={"1": "2160x1080", "0": "536x240"}),
       Setting("SCALE", "Window scale",
-              "Multiplies the base size BIG selects. Blank fits the window to your smallest monitor in"
-              + " EITHER direction -- it shrinks BIG=1 to fit a 1080p screen and grows BIG=0 up from its"
-              + " 536x240 postage stamp. Set a number to override.",
+              "Scale the selected base resolution. Leave blank to fit it automatically to the"
+              + " smallest monitor; enter a number to set an explicit multiplier.",
               "", numeric=True, step=0.1),
     ]),
-    Section("Car", "The car openpilot believes it is driving.", [
+    Section("Car", "Vehicle identity, geometry, and steering calibration.", [
       Setting("BEAMPILOT_REPORT_GEAR", "Report the real gear",
-              "openpilot raises wrongGear/reverseGear off this, which is what stops it engaging while the"
-              + " car rolls backwards. Turn it off if reversing under openpilot is the point -- arcade"
-              + " mode, or messing about in a car park. Off pins the gear to drive.",
+              "Report BeamNG's current gear to openpilot. This prevents engagement in reverse."
+              + " When disabled, the reported gear remains Drive.",
               "1", choices=["1", "0"]),
       Setting("FINGERPRINT", "Fingerprint",
-              "BEAMPILOT is our own opendbc platform: the same Honda Bosch CAN beamngd packs,"
-              + " without a Civic's steering rack, weight distribution and engagement speeds"
-              + " coming with it. Its geometry is a placeholder -- the mod measures the real"
-              + " vehicle. HONDA_CIVIC_2022 is the old behaviour and is still fully supported;"
-              + " every engagement-critical value is identical between the two. Anything else"
-              + " needs beamngd rewritten.",
+              "BEAMPILOT is the native simulator platform and uses geometry reported by the mod."
+              + " HONDA_CIVIC_2022 preserves the previous Civic-based behavior. Other fingerprints"
+              + " are incompatible with the CAN messages generated by beamngd.",
               "BEAMPILOT", choices=["BEAMPILOT", "HONDA_CIVIC_2022"],
               warn="beamngd packs Honda Bosch CAN; another car needs code changes"),
-      Setting("BEAMPILOT_BEAMNG_GEOMETRY", "Measure the real vehicle",
-              "The mod measures the vehicle BeamNG actually spawned -- wheelbase, weight"
-              + " distribution, mass, yaw inertia, steering lock, and the rack ratio -- and sends"
-              + " them over, so openpilot steers the car in front of you instead of a Honda."
-              + " THE setting for a car that understeers through corners when raising the lateral"
-              + " limit changed nothing. Needs the mod reinstalled (./setup_beampilot.sh); with an"
-              + " old mod nothing arrives and it falls back to the Civic on its own."
-              + " Off restores exactly the pre-measurement behaviour.",
+      Setting("BEAMPILOT_BEAMNG_GEOMETRY", "Use measured geometry",
+              "Use wheelbase, weight distribution, mass, yaw inertia, steering lock, and steering"
+              + " ratio reported by the spawned BeamNG vehicle. If no geometry packet arrives,"
+              + " openpilot falls back to fingerprint values. Re-run setup after updating the mod.",
               "1", choices=["1", "0"]),
-      Setting("BEAMPILOT_LIVE_STEER_PARAMS", "Follow the live estimate",
-              "paramsd estimates the steering ratio and tyre stiffness from how the car actually"
-              + " responds, and stock openpilot feeds that back every tick. When the mod has"
-              + " measured a ratio, that one is pinned instead and only the tyre stiffness is"
-              + " followed -- geometry beats inference. Off freezes both at their static values.",
+      Setting("BEAMPILOT_LIVE_STEER_PARAMS", "Use live steering estimates",
+              "Apply paramsd's live steering-ratio and tire-stiffness estimates. A ratio measured"
+              + " from vehicle geometry takes priority; tire stiffness can still update. Disable"
+              + " to keep both parameters at their static values.",
               "1", choices=["1", "0"]),
       Setting("BEAMPILOT_STEER_RATIO", "Steering ratio",
-              "Degrees of steering wheel per degree of road wheel. Blank is right for almost"
-              + " everyone: the mod measures it once from the real wheel angle against the real"
-              + " road wheel angle, remembers it per vehicle and per rack, and until then"
-              + " estimates it from the car's steering lock. Setting it here pins ONE value for"
-              + " every vehicle and ignores all of that -- the Civic's is 15.38. To correct a"
-              + " single car instead, edit the remembered value in the cache file below.",
+              "Steering-wheel degrees per road-wheel degree. Leave blank to measure and cache the"
+              + " value per vehicle and steering rack. An explicit value overrides measurement for"
+              + " every vehicle; the Civic reference value is 15.38.",
               "", numeric=True, step=0.5),
-      Setting("BEAMPILOT_SEED_STEER_RATIO", "Estimate the ratio from the lock",
-              "Before a vehicle has ever been measured, work its steering ratio out from its"
-              + " steering lock instead of using the Civic's 15.38. The lock is known the instant"
-              + " the car spawns and ranges from 270 to 900 degrees across BeamNG's vehicles,"
-              + " while the road wheel angle at full lock is set by the suspension and barely"
-              + " varies -- so the ratio is very nearly proportional to it. Off falls back to the"
-              + " fingerprint's value.",
+      Setting("BEAMPILOT_SEED_STEER_RATIO", "Estimate ratio from lock",
+              "Estimate an unmeasured vehicle's steering ratio from its steering lock. Disable to"
+              + " use the fingerprint's steering ratio until a measurement is available.",
               "1", choices=["1", "0"]),
-      Setting("BEAMPILOT_STEER_CALIBRATE", "Measure the ratio automatically",
-              "The first time a vehicle and rack are seen, the mod sweeps the steering once while"
-              + " you are parked and reads the ratio straight off it -- about 2.5 seconds, exact,"
-              + " then remembered forever. This is why there is no per-car lookup table: a table"
-              + " could never cover a mod, a custom config or a rack swap. Only ever runs stopped"
-              + " with openpilot not driving, aborts the moment either changes, and is not asked"
-              + " for at all once the ratio is known. Off measures from ordinary driving instead.",
+      Setting("BEAMPILOT_STEER_CALIBRATE", "Auto-measure steering ratio",
+              "Run one steering sweep when an uncached vehicle and rack are first detected. The"
+              + " sweep takes about 2.5 seconds, only runs while stopped and disengaged, and aborts"
+              + " if either condition changes. Disable to measure during normal driving instead.",
               "1", choices=["1", "0"]),
-      Setting("BEAMPILOT_STEER_RATIO_CACHE", "Remembered ratios",
-              "Where measured steering ratios are saved, keyed by vehicle AND steering lock"
-              + " (BeamNG's racks are parts, not car properties). Plain JSON, meant to be edited:"
-              + " if one car measured badly, fix its number here rather than pinning every car.",
+      Setting("BEAMPILOT_STEER_RATIO_CACHE", "Steering ratio cache",
+              "JSON file containing measured ratios, keyed by vehicle and steering lock. Edit an"
+              + " individual cache entry to correct one vehicle without setting a global override.",
               "~/.config/beampilot/steer_ratios.json"),
       Setting("BEAMPILOT_WHEELBASE_M", "Wheelbase (m)",
-              "Front axle to rear axle. Blank means measured. Set it to pin one; the Civic's is 2.70."
-              + " Much less important than the steering ratio -- it mostly affects the"
-              + " speed-dependent understeer term.",
+              "Distance between the front and rear axles. Leave blank to use measured geometry."
+              + " The Civic reference value is 2.70 m.",
               "", numeric=True, step=0.05),
       Setting("BEAMPILOT_CENTER_TO_FRONT_M", "Centre of gravity to front axle (m)",
-              "Where the weight sits between the axles, which is what makes a car understeer or"
-              + " oversteer. Blank means measured from every node's mass. Civic 1.08.",
+              "Distance from the center of gravity to the front axle. Leave blank to calculate it"
+              + " from the vehicle's node masses. The Civic reference value is 1.08 m.",
               "", numeric=True, step=0.05),
       Setting("BEAMPILOT_MASS_KG", "Mass (kg)",
-              "Blank means measured. Civic 1462.",
+              "Vehicle mass. Leave blank to use the measured value. The Civic reference is 1462 kg.",
               "", numeric=True, step=25.0),
       Setting("BEAMPILOT_ROTATIONAL_INERTIA", "Yaw inertia (kg m2)",
-              "How hard the car is to rotate about its vertical axis. Blank means measured, which"
-              + " is a real integral over the body -- openpilot's own value is extrapolated from a"
-              + " Civic's mass and wheelbase. Civic 2500.",
+              "Resistance to rotation about the vertical axis. Leave blank to calculate it from"
+              + " the vehicle body. The Civic reference value is 2500 kg m2.",
               "", numeric=True, step=100.0),
       Setting("BEAMPILOT_STEER_LOCK_DEG", "Steering lock (deg)",
-              "Centre to full lock: the divisor that turns a steering wheel angle into BeamNG's"
-              + " -1..1 input. Too low oversteers, too high runs wide. Leave it alone and the mod"
-              + " reads the real one out of the spawned vehicle's jbeam, which is exact and"
-              + " per-vehicle; 510 is only the fallback for when nothing reports one. Change it"
-              + " here to pin one value for every car -- beamngd then warns at startup if it is"
-              + " more than 10% off what the car actually has.",
+              "Steering-wheel angle from center to full lock, used to normalize BeamNG steering"
+              + " input. The mod normally reports this per vehicle; 510 degrees is the fallback."
+              + " An explicit value applies to every vehicle.",
               "510.0", numeric=True, step=10.0),
       Setting("BEAMPILOT_CALIBRATION", "Calibration",
-              "instant = start already calibrated at a level pose, usable right away. "
-              + "live = converge from real driving first; won't engage until it has.",
+              "instant seeds a valid level-pose calibration at startup. live requires calibration"
+              + " to converge from driving before engagement.",
               "instant", choices=["instant", "live"]),
     ]),
-    Section("Driving limits", "Stock openpilot follows EU/ISO comfort limits. These are often why it won't corner.", [
+    Section("Driving limits", "Acceleration, steering response, and curve-speed limits.", [
       Setting("BEAMPILOT_MAX_LAT_ACCEL", "Lateral accel (m/s2)",
-              "Turning. Max curvature is accel/v^2 -- stock 3.0 allows only a ~300m radius at 67mph."
-              + " The shipped config raises this to 5.0.",
+              "Maximum lateral acceleration used to limit curvature at speed. Stock openpilot uses"
+              + " 3.0 m/s2; the shipped configuration uses 5.0 m/s2.",
               "3.0", numeric=True, step=0.5),
       Setting("BEAMPILOT_MAX_LAT_JERK", "Lateral jerk (m/s3)",
-              "How fast curvature may change. The most likely cause of weaving if raised too far."
-              + " The shipped config raises this to 8.0.",
+              "Maximum rate of lateral-acceleration change. Higher values allow faster steering"
+              + " transitions but can increase oscillation. Stock is 5.0 m/s3; shipped is 8.0.",
               "5.0", numeric=True, step=0.5),
       Setting("BEAMPILOT_ACCEL_SCALE", "Accel scale",
-              "Multiplier on the acceleration envelope. 1.0 is stock; the shipped config uses 2.0.",
+              "Multiplier for the longitudinal acceleration envelope. Stock is 1.0; the shipped"
+              + " configuration uses 2.0.",
               "1.0", numeric=True, step=0.25),
       Setting("BEAMPILOT_DECEL_SCALE", "Decel scale",
-              "Same for braking. 1.0 is stock; the shipped config uses 1.5.",
+              "Multiplier for the longitudinal braking envelope. Stock is 1.0; the shipped"
+              + " configuration uses 1.5.",
               "1.0", numeric=True, step=0.25),
       Setting("BEAMPILOT_PERSONALITY", "Following distance",
-              "0 aggressive (1.25s, brakes latest) / 1 standard (1.45s) / 2 relaxed (1.75s).",
+              "Select the desired time gap: aggressive 1.25 s, standard 1.45 s, or relaxed 1.75 s.",
               "0", choices=["0", "1", "2"],
               value_labels={"0": "aggressive", "1": "standard", "2": "relaxed"}),
       Setting("BEAMPILOT_STEER_SWEEP_SECONDS", "Steering response (s)",
-              "Lock-to-lock sweep time. Lower is snappier but twitchier.",
+              "Time used to rate-limit a full steering sweep. Lower values respond faster and may"
+              + " reduce stability.",
               "0.15", numeric=True, step=0.05),
-      Setting("BEAMPILOT_CURVE_SLOWDOWN", "Slow for corners (test)",
-              "Stock openpilot holds the set speed through a bend and only caps acceleration once"
-              + " already in it. With a narrow camera the model sees a corner late, so the car carries"
-              + " too much speed in and runs wide. This brakes for it beforehand, using the curvature"
-              + " the model has already predicted. OFF by default -- it is a planning layer stock"
-              + " openpilot does not have, so drive the same road both ways and compare.",
+      Setting("BEAMPILOT_CURVE_SLOWDOWN", "Curve slowdown (experimental)",
+              "Reduce speed before a curve using curvature predicted by the model. Stock openpilot"
+              + " does not apply this additional planning layer. Disabled by default.",
               "0", choices=["0", "1"],
               warn="experimental: adds longitudinal planning openpilot does not normally do"),
       Setting("BEAMPILOT_CURVE_LAT_ACCEL", "Cornering accel (m/s2)",
-              "What lateral acceleration to aim for in a corner, which sets the speed it slows to."
-              + " Defaults to 0.7x the hard lateral limit so there is something in reserve mid-corner."
-              + " Higher corners faster.",
+              "Target lateral acceleration used by curve slowdown to choose corner speed. The"
+              + " default is 70% of the maximum lateral-acceleration limit.",
               "2.1", numeric=True, step=0.1,
               derive=lambda v: f"{round(0.7 * _as_float(v.get('BEAMPILOT_MAX_LAT_ACCEL'), 3.0), 3):g}"),
       Setting("BEAMPILOT_ACTUATION_MARGIN", "Actuation headroom",
-              "How much room the excessive-actuation check keeps above what the limits above allow."
-              + " It soft-disables on MEASURED actuation, so left at stock it becomes a ceiling on the"
-              + " limits rather than a net under them -- raise the lateral limit past it and the car"
-              + " hands back control mid-corner instead of cornering harder. Never drops below stock.",
+              "Margin between configured driving limits and the excessive-actuation safety check."
+              + " Increase it when raising the limits to prevent valid commanded actuation from"
+              + " triggering a soft disable. It never reduces the stock threshold.",
               "2.0", numeric=True, step=0.25),
       Setting("BEAMPILOT_MAX_CURVATURE", "Max curvature (1/m)",
-              "Hard geometric cap on turn tightness. Only binds below ~11mph; 0.2 = a 5m radius.",
+              "Geometric curvature limit. A value of 0.2 1/m corresponds to a 5 m turn radius and"
+              + " normally applies only at low speed.",
               "0.2", numeric=True, step=0.05),
     ]),
-    Section("Controls", "Keys are read from the keyboard directly, since BeamNG holds focus.", [
-      Setting("BEAMPILOT_KEY_SET", "Set / engage key", "Check BeamNG's own bindings before rebinding.", "i"),
-      Setting("BEAMPILOT_KEY_RESUME", "Resume / speed up key", "", "o"),
-      Setting("BEAMPILOT_KEY_CANCEL", "Cancel key", "", "u"),
+    Section("Controls", "Keyboard bindings and control-input behavior.", [
+      Setting("BEAMPILOT_KEY_SET", "Set / engage key",
+              "Keyboard key used to set cruise speed and engage. Avoid conflicts with BeamNG bindings.", "i"),
+      Setting("BEAMPILOT_KEY_RESUME", "Resume / speed up key",
+              "Keyboard key used to resume or increase the cruise set speed.", "o"),
+      Setting("BEAMPILOT_KEY_CANCEL", "Cancel key", "Keyboard key used to disengage control.", "u"),
       Setting("BEAMPILOT_CRUISE_STEP_MPH", "Speed step (mph)", "Per-tap speed change.", "1.0", numeric=True, step=1.0),
       Setting("BEAMPILOT_AUTO_LANE_CHANGE", "Auto lane change",
-              "Signal alone commits the change. Required here -- there is no wheel to nudge, so with"
-              + " this off (the code default) a signalled lane change never commits. The shipped config"
-              + " turns it on.",
+              "Start a lane change from the turn signal alone. This replaces openpilot's steering-"
+              + "torque confirmation, which is unavailable without a physical steering wheel.",
               "0", choices=["1", "0"]),
       Setting("BEAMPILOT_CONTROL_MODE", "Control mode",
-              "lua injects into the game directly. joystick needs axes bound in BeamNG's Options > Controls.",
+              "lua sends input directly through the BeamNG mod. joystick uses a virtual controller"
+              + " and requires axis bindings in BeamNG.",
               "lua", choices=["lua", "joystick"]),
     ]),
-    Section("Blind spot", "The mod sees every vehicle in the scene, so openpilot can refuse to move into one.", [
+    Section("Blind spot", "Lane-change blocking and blind-spot display settings.", [
       Setting("BEAMPILOT_BSM", "Blind spot monitoring",
-              "Detected in the BeamNG mod, so it works off the simulator's own traffic rather than the camera."
-              + " Blocks a signalled lane change and shows \"Car Detected in Blindspot\"."
-              + " Needs the mod reinstalled if you are upgrading from an older build.",
+              "Use BeamNG vehicle positions to detect traffic beside the vehicle. Detection blocks"
+              + " lane changes and raises the blind-spot alert. Re-run setup after updating the mod.",
               "1", choices=["1", "0"]),
       Setting("BEAMPILOT_LANE_CHANGE_ABORT", "Cancel lane change",
-              "Abort a lane change already under way if the target lane fills up. Stock openpilot only"
-              + " checks the blind spot on the way in and never looks again. Holds the blinker armed and"
-              + " re-commits by itself once the lane clears.",
+              "Cancel an active lane change if a vehicle enters the target blind spot. The turn"
+              + " signal remains active so the maneuver can restart after the lane clears.",
               "1", choices=["1", "0"]),
       Setting("BEAMPILOT_LANE_CHANGE_ABORT_S", "Cancel window (s)",
-              "How late into the move a cancel may still fire. Past the halfway point the car is mostly"
-              + " in the new lane and swerving back is its own hazard. Set very high to allow it any time.",
+              "Maximum time after lane-change start during which a blind-spot detection can cancel"
+              + " the maneuver. Later cancellation can create a sharper return to the original lane.",
               "2.0", numeric=True, step=0.5),
       Setting("BEAMPILOT_SIGNAL_AUTO_CANCEL", "Cancel signal after a change",
-              "Switch the blinker off once a lane change finishes. Nothing in the game cancels an"
-              + " indicator that was never physically stalked. A change cancelled by the blind spot"
-              + " deliberately keeps its signal on, which is what lets it resume.",
+              "Turn off the signal after a completed lane change. A lane change cancelled by blind-"
+              + "spot detection keeps the signal active so it can resume.",
               "1", choices=["1", "0"]),
       Setting("BEAMPILOT_BSM_APPROACHING", "Warn on closing traffic",
-              "Also count a car that is not beside you yet but is closing fast enough to be there mid-manoeuvre.",
+              "Include vehicles that are approaching the blind-spot zone fast enough to enter it"
+              + " during a lane change.",
               "1", choices=["1", "0"]),
       Setting("BEAMPILOT_BSM_WIDTH_M", "Zone width (m)",
-              "How far out from your flank the zone reaches. 3.6 is about one lane; raise it for wide lanes.",
+              "Lateral reach of each blind-spot zone. 3.6 m is approximately one lane width.",
               "3.6", numeric=True, step=0.2),
       Setting("BEAMPILOT_BSM_REAR_M", "Zone rear reach (m)",
               "How far past your rear bumper the zone extends.",
               "4.0", numeric=True, step=0.5),
       Setting("BEAMPILOT_BSM_INDICATOR", "Mirror lamps",
-              "Amber chevrons at the edges of the road view. Off by default because the radar markers"
-              + " already occupy that space. The blind spot still gates lane changes and still raises"
-              + " its alert either way. Worth turning on if you run with the radar off.",
+              "Show amber blind-spot chevrons at the edges of the road view. This affects display"
+              + " only; lane-change blocking and alerts remain active when it is disabled.",
               "0", choices=["0", "1"]),
       Setting("BEAMPILOT_BSM_DEBUG", "Log state changes",
-              "Prints every blind spot change to the beamngd terminal and the BeamNG console. For tuning the zone.",
+              "Log blind-spot state changes to the beamngd terminal and BeamNG console.",
               "0", choices=["0", "1"]),
     ]),
-    Section("Radar", "Where the car in front actually is, from the simulator rather than from the camera.", [
+    Section("Radar", "Simulator-based traffic tracks and lead selection.", [
       Setting("BEAMPILOT_RADAR", "Ground-truth radar",
-              "Reports nearby traffic as radar points. This car is radarless, so with this off openpilot"
-              + " finds the lead with the camera alone -- the same camera that is fed the wrong intrinsics,"
-              + " and distance to the car in front is exactly what that gets wrong. OFF by default: it is"
-              + " the simulator's object list, not a sensor. Needs the mod reinstalled if you are"
-              + " upgrading from an older build.",
+              "Publish nearby BeamNG vehicles as radar tracks. When disabled, openpilot uses camera-"
+              + "based lead estimates only. Disabled by default because this uses simulator object"
+              + " data rather than a simulated physical sensor. Re-run setup after updating the mod.",
               "0", choices=["0", "1"]),
-      Setting("BEAMPILOT_RADAR_LEADS", "Radar can find a lead alone",
-              "Let a track become the lead with no confirmation from the camera. Off (default) means radar"
-              + " only refines a lead the camera already found -- accurate distance, same timing. ON hands"
-              + " openpilot leads the camera never saw, so it starts managing distance much earlier, which"
-              + " from the seat reads as braking absurdly early for cars still a long way off.",
+      Setting("BEAMPILOT_RADAR_LEADS", "Allow radar-only leads",
+              "Allow a radar track to become the lead without camera confirmation. When disabled,"
+              + " radar only refines the distance and speed of a camera-detected lead. Enabling this"
+              + " can cause earlier speed adjustments for distant traffic.",
               "0", choices=["0", "1"]),
       Setting("BEAMPILOT_RADAR_ONCOMING", "Report oncoming traffic",
-              "Off by default. An approaching car is not a lead, and on a narrow road the in-path test is"
-              + " quite capable of picking one -- which is a hard-braking event for a car that was going to"
-              + " pass on the other side anyway. A STATIONARY car facing you is still reported: that is a"
-              + " breakdown in your lane.",
+              "Include moving oncoming vehicles in radar tracks. Disabled by default to prevent an"
+              + " oncoming vehicle on a narrow road from being selected as the lead. Stationary"
+              + " vehicles remain eligible regardless of heading.",
               "0", choices=["0", "1"]),
       Setting("BEAMPILOT_RADAR_OCCLUSION", "Require line of sight",
-              "Drop anything hidden behind a hill or a building. Static geometry only, so a car does not"
-              + " hide the car behind it -- real radar sees under and around one. This is the big one for"
-              + " realism: without it the radar reads straight through terrain.",
+              "Exclude tracks blocked by terrain or buildings. The line-of-sight test uses static"
+              + " geometry; vehicles do not occlude one another.",
               "1", choices=["1", "0"]),
       Setting("BEAMPILOT_RADAR_NOISE_M", "Range noise (m)",
-              "Real radar is not exact, and openpilot's Kalman filter is built expecting it not to be."
-              + " 0 gives you the simulator's exact answer.",
+              "Standard range variation added to tracks. Set to 0 for exact simulator distance.",
               "0.12", numeric=True, step=0.05),
       Setting("BEAMPILOT_RADAR_LEAD_HALF_WIDTH_M", "In-lane width (m)",
-              "How far off the model's predicted path a track may sit and still count as being in your"
-              + " lane. Measured against the path, so it follows a bend. Wider risks braking for the"
-              + " next lane over; narrower risks missing your own lead on a curve.",
+              "Maximum lateral distance from the predicted path for radar-only lead selection. A"
+              + " wider value may include adjacent lanes; a narrower value may reject leads on curves.",
               "1.8", numeric=True, step=0.2),
       Setting("BEAMPILOT_RADAR_RANGE_M", "Radar range (m)",
-              "Deliberately shorter than real radar reaches. The camera would never have seen a lead at"
-              + " 150 m, so handing openpilot one changes when it starts managing distance -- which reads"
-              + " as braking absurdly early.",
+              "Maximum distance at which vehicles are reported. Longer ranges can cause openpilot to"
+              + " begin managing speed for traffic earlier.",
               "110", numeric=True, step=10.0),
       Setting("BEAMPILOT_RADAR_HALF_WIDTH_M", "Beam half-width (m)",
-              "How wide the beam is at your bumper, before it spreads. Narrow enough not to fill the track"
-              + " list with the next carriageway; wide enough to hold your own lane round a bend.",
+              "Half-width of the radar search area at the vehicle before angular spread is applied."
+              + " Increase it for wide lanes or sharp curves.",
               "3.0", numeric=True, step=0.5),
       Setting("BEAMPILOT_RADAR_MAX_TRACKS", "Max tracks",
-              "Nearest first; anything past this is dropped. Hard ceiling of 24 in the wire format.",
+              "Maximum number of nearest tracks sent per scan. The protocol limit is 24.",
               "12", numeric=True, step=1.0),
       Setting("BEAMPILOT_RADAR_INDICATOR", "Show tracks on screen",
-              "A cyan diamond on the road under every radar track, ringed on whichever one radard picked"
-              + " as the lead. Projected through the same calibration as the model's path. This is how you"
-              + " tell 'no traffic' apart from 'the feed is dead' -- a missing lead chevron cannot.",
+              "Draw a cyan road marker for each radar track and a ring around the selected lead."
+              + " This can also confirm that radar data is reaching the interface.",
               "1", choices=["1", "0"]),
       Setting("BEAMPILOT_RADAR_DEBUG", "Log the nearest track",
-              "Prints the closest track to the BeamNG console every scan. Noisy in traffic; for checking"
-              + " the mod sees what you think it does.",
+              "Log the nearest track to the BeamNG console on every scan.",
               "0", choices=["0", "1"]),
     ]),
-    Section("Camera", "beamcamd captures the BeamNG window off your desktop.", [
+    Section("Camera", "Road-camera mode, placement, and screen capture.", [
       Setting("BEAMPILOT_CAMERA_MODE", "Road-camera mode",
-              "narrow renders the calibrated 25.70 deg view, publishes only narrowRoad, and lets"
-              + " modeld use its supported single-camera path. wide_crop renders a calibrated 93.62"
-              + " deg wide view: the full image feeds wideRoad and a centred angular crop feeds"
-              + " narrowRoad. That is the experimental one-render approximation for trying openpilot"
-              + " Experimental mode; its enlarged narrow crop has less detail than a separate camera.",
+              "narrow publishes a calibrated 25.70-degree narrowRoad stream. wide_crop renders a"
+              + " calibrated 93.62-degree image, publishes it as wideRoad, and derives narrowRoad"
+              + " from a centered crop. The crop has less detail than a separate narrow camera.",
               "narrow", choices=["narrow", "wide_crop"],
               warn="wide_crop is experimental and needs in-game validation",
               value_labels={"narrow": "narrow (default)",
                             "wide_crop": "wide + narrow crop (experimental)"}),
       Setting("BEAMPILOT_WIDE_CAMERA_PLACEMENT", "Wide-camera placement",
-              "vehicle_front measures the spawned car's own bounding box and puts the wide lens"
-              + " just ahead of its front edge, so a different JBeam reference-node position cannot"
-              + " put the camera in the cabin or bonnet. legacy keeps openpilot_cam's fixed"
-              + " offFwd/offUp pose. This only changes wide_crop; narrow keeps its tuned pose.",
+              "vehicle_front places the wide lens from the spawned vehicle's bounding box to avoid"
+              + " interior or body clipping. legacy uses fixed camera offsets. This setting affects"
+              + " wide_crop only; narrow retains its existing placement.",
               "vehicle_front", choices=["vehicle_front", "legacy"],
               value_labels={"vehicle_front": "adaptive per vehicle",
                             "legacy": "legacy fixed offsets"}),
       Setting("BEAMPILOT_WIDE_CAMERA_HEIGHT_M", "Wide camera height (m)",
-              "Height above the bottom of that vehicle's bounding box. 1.22 matches the approximate"
-              + " comma device height assumed by the model. Raise only if an unusual vehicle still"
-              + " intersects the lens.",
+              "Lens height above the bottom of the vehicle bounding box. The default 1.22 m matches"
+              + " the approximate device height expected by the model.",
               "1.22", numeric=True, step=0.05),
       Setting("BEAMPILOT_WIDE_CAMERA_CLEARANCE_M", "Wide front clearance (m)",
-              "How far ahead of the vehicle's frontmost bounding plane to put the wide lens."
-              + " Increase slightly if a mod vehicle has bodywork outside its spawn bounds.",
+              "Distance between the lens and the front of the vehicle bounding box. Increase this"
+              + " if bodywork remains visible in the wide image.",
               "0.15", numeric=True, step=0.05),
       Setting("BEAMPILOT_CAPTURE_BACKEND", "Capture backend",
-              "auto picks X11 grabbing on X11 and the desktop portal on Wayland. portal asks you to"
-              + " pick the window once (a share dialog, remembered afterwards) and streams it over"
-              + " PipeWire -- required on Wayland, and on X11 it is smoother and skips window"
-              + " detection entirely, at the cost of needing gst-launch-1.0 and a desktop portal."
-              + " x11 forces the classic grab; on Wayland that yields all-green frames.",
+              "auto selects X11 capture on X11 and portal/PipeWire capture on Wayland. portal"
+              + " requires a screen-sharing selection and GStreamer. x11 forces direct X11 capture"
+              + " and does not work on native Wayland surfaces.",
               "auto", choices=["auto", "x11", "portal"]),
       Setting("BEAMPILOT_CAM_ASPECT", "Aspect handling",
-              "openpilot's frame is 1.596 wide; a full-screen 16:9 window is 1.778, so the picture gets"
-              + " squeezed ~11% horizontally and everything reads as closer to the centre of the lane"
-              + " than it is. crop trims the sides first, matching the selected narrow or wide lens's"
-              + " intrinsics. stretch is the old behaviour. Better than either: size the BeamNG"
-              + " window 1928x1208, then nothing is cropped OR resampled.",
+              "crop trims the sides to match openpilot's 1.596 frame aspect before resizing. stretch"
+              + " resizes the complete capture and distorts a 16:9 image horizontally. A 1928x1208"
+              + " BeamNG window matches the target aspect without cropping.",
               "crop", choices=["crop", "stretch"]),
       Setting("BEAMPILOT_CAM_WINDOW", "Track window",
               "Match text for the BeamNG window; it follows the window as it moves or resizes. Blank = capture a whole monitor. Needs X11 and xdotool.",
@@ -497,14 +447,15 @@ def build_sections() -> list[Section]:
       Setting("BEAMPILOT_CAM_REGION", "Capture region",
               "left,top,width,height. Overrides both of the above with a fixed rectangle.", ""),
     ]),
-    Section("Alerts", "What openpilot complains about. See the README before turning these off.", [
+    Section("Alerts", "Alert handling and optional process suppression.", [
       Setting("BEAMPILOT_IGNORE_COMM_ISSUE", "Ignore comm issues",
-              "Timing hiccups stop disengaging. Behavioural, not cosmetic -- it will drive on stale data if a process stalls.",
+              "Prevent communication-timing events from disengaging control. This can allow control"
+              + " to continue with stale data if a process stalls.",
               "1", choices=["1", "0"],
               warn="openpilot will keep driving if modeld stalls"),
       Setting("BLOCK", "Blocked processes", "Comma-separated. soundd mutes the alert chimes.", ",soundd"),
     ]),
-    Section("Bridge", "How beamngd talks to the game. Defaults are fine unless something conflicts.", [
+    Section("Bridge", "Bridge timing, network address, and UDP ports.", [
       Setting("BEAMPILOT_TICK_HZ", "Bridge rate (Hz)",
               "How often beamngd runs. 100 matches the CAN rate openpilot expects.",
               "100", numeric=True, step=10.0),
@@ -520,7 +471,8 @@ def build_sections() -> list[Section]:
               "Where the game is. Only change this if BeamNG runs on another machine.",
               "127.0.0.1"),
       Setting("BEAMPILOT_LAUNCH_DELAY", "Launch countdown (s)",
-              "Seconds to wait before starting, to tab into the game. 0 = start immediately.",
+              "Delay before starting the stack. Use this to return focus to BeamNG; 0 starts"
+              + " immediately.",
               "0", numeric=True, step=1.0),
     ]),
   ]
@@ -708,6 +660,9 @@ class Tui:
   def __init__(self, stdscr):
     self.stdscr = stdscr
     self.sections = build_sections()
+    # Hardware probing shells out. Cache this instead of doing it on every
+    # repaint/key press.
+    self.gpu_summary = gpu_detail()
     self.values = self.load()
     self.on_disk = dict(self.values)
     self.rows = self.flatten()
@@ -715,6 +670,7 @@ class Tui:
     self.scroll = 0
     self.status = ""
     self.dirty = False
+    self.quit_armed = False
 
   # ---------------------------------------------------------------- state --
 
@@ -765,6 +721,26 @@ class Tui:
         return obj
     return None
 
+  def active_section(self) -> Section:
+    return self.section_of(self.cursor) or self.sections[0]
+
+  def active_section_index(self) -> int:
+    return self.sections.index(self.active_section())
+
+  def setting_indices(self, section: Section | None = None) -> list[int]:
+    """Global row indices for one section's settings."""
+    wanted = section or self.active_section()
+    return [i for i, (kind, obj) in enumerate(self.rows)
+            if kind == "setting" and obj in wanted.settings]
+
+  def select_section(self, index: int):
+    """Open a section at its first setting."""
+    section = self.sections[index % len(self.sections)]
+    indices = self.setting_indices(section)
+    if indices:
+      self.cursor = indices[0]
+      self.scroll = 0
+
   def refresh_derived(self):
     """A derived default follows the setting it is derived from, live."""
     for sec in self.sections:
@@ -782,35 +758,32 @@ class Tui:
   # ------------------------------------------------------------ movement --
 
   def move(self, delta: int):
-    n = len(self.rows)
-    for _ in range(n):
-      self.cursor = (self.cursor + delta) % n
-      if self.rows[self.cursor][0] == "setting":
-        return
+    # Up/down stays inside the visible section.  Crossing a category boundary
+    # in the old 71-row list was easy to do accidentally and left the heading
+    # off-screen; Tab and the numbered section shortcuts are explicit.
+    indices = self.setting_indices()
+    if not indices:
+      return
+    try:
+      pos = indices.index(self.cursor)
+    except ValueError:
+      pos = 0
+    self.cursor = indices[(pos + delta) % len(indices)]
 
   def move_page(self, delta: int):
-    for _ in range(8):
-      nxt = self.cursor + delta
-      if not 0 <= nxt < len(self.rows):
-        break
-      self.cursor = nxt
-    if self.rows[self.cursor][0] != "setting":
-      self.move(1 if delta > 0 else -1)
+    indices = self.setting_indices()
+    if not indices:
+      return
+    pos = indices.index(self.cursor)
+    self.cursor = indices[max(0, min(len(indices) - 1, pos + delta * 8))]
 
   def move_section(self, delta: int):
-    n = len(self.rows)
-    i = self.cursor
-    for _ in range(n):
-      i = (i + delta) % n
-      if self.rows[i][0] == "section":
-        self.cursor = i
-        self.move(1)
-        return
+    self.select_section(self.active_section_index() + delta)
 
   def jump_home(self, end: bool = False):
-    self.cursor = len(self.rows) - 1 if end else 0
-    if self.rows[self.cursor][0] != "setting":
-      self.move(-1 if end else 1)
+    indices = self.setting_indices()
+    if indices:
+      self.cursor = indices[-1 if end else 0]
 
   def find(self):
     needle = self.prompt("find: ")
@@ -823,8 +796,9 @@ class Tui:
       kind, obj = self.rows[idx]
       if kind != "setting":
         continue
-      if needle in obj.label.lower() or needle in obj.key.lower():
+      if needle in obj.label.lower() or needle in obj.key.lower() or needle in obj.help.lower():
         self.cursor = idx
+        self.scroll = 0
         self.status = f"found {obj.key}"
         return
     self.status = f"nothing matches {needle!r}"
@@ -975,79 +949,126 @@ class Tui:
     except curses.error:
       pass
 
-  def layout(self, w):
-    """Column x-positions, degrading as the terminal narrows."""
-    label_w = 30 if w >= 92 else 24
-    value_w = 16 if w >= 92 else 12
-    lx = 3
-    vx = lx + label_w + 1
-    nx = vx + value_w + 2
-    return label_w, value_w, lx, vx, nx if nx < w - 10 else None
+  def layout(self, w, origin=0):
+    """Responsive setting columns inside ``origin..w``."""
+    usable = max(1, w - origin - 2)
+    value_w = 18 if usable >= 76 else 14
+    source_w = 18 if usable >= 62 else 0
+    reserved = value_w + (source_w + 2 if source_w else 0) + 6
+    label_w = max(12, usable - reserved)
+    lx = origin + 3
+    vx = lx + label_w + 2
+    nx = vx + value_w + 2 if source_w else None
+    return label_w, value_w, source_w, lx, vx, nx
+
+  def override_count(self, section: Section | None = None) -> int:
+    settings = section.settings if section else [s for sec in self.sections for s in sec.settings]
+    return sum(not s.is_default(self.values.get(s.key, self.defaults.get(s.key, s.default)), self.values)
+               for s in settings)
+
+  def source_label(self, setting: Setting) -> str:
+    value = self.values.get(setting.key, self.defaults.get(setting.key, setting.default))
+    if self.unsaved(setting.key):
+      return "● unsaved"
+    if not setting.is_default(value, self.values):
+      return "custom"
+    if setting.key in self.in_file:
+      return "pinned default"
+    return "code default"
+
+  def draw_sidebar(self, width: int, footer_start: int):
+    active = self.active_section_index()
+    self.put(2, 1, "SECTIONS", curses.A_BOLD | curses.color_pair(4), width + 1)
+    self.put(2, width - 7, "CUSTOM", curses.A_DIM, width + 1)
+    self.put(3, 1, "─" * (width - 2), curses.A_DIM, width + 1)
+    for i, section in enumerate(self.sections):
+      y = 4 + i
+      if y >= footer_start:
+        break
+      selected = i == active
+      attr = curses.A_REVERSE | curses.A_BOLD if selected else curses.A_NORMAL
+      self.put(y, 0, " " * width, attr, width + 1)
+      marker = "▸" if selected else " "
+      self.put(y, 1, f"{marker} {i + 1} {_fit(section.name, width - 10)}", attr, width + 1)
+      custom = self.override_count(section)
+      dirty = any(self.unsaved(s.key) for s in section.settings)
+      badge = f"● {custom}" if dirty else (str(custom) if custom else "—")
+      badge_attr = attr if selected else (curses.color_pair(3) if dirty else curses.A_DIM)
+      self.put(y, width - len(badge) - 2, badge, badge_attr, width + 1)
+    for y in range(1, footer_start):
+      self.put(y, width, "│", curses.A_DIM, width + 2)
 
   def draw(self):
     self.stdscr.clear()
     h, w = self.stdscr.getmaxyx()
-    label_w, value_w, lx, vx, nx = self.layout(w)
-
-    overridden = sum(1 for k, v in self.values.items() if v != self.defaults.get(k))
-    title = " beampilot setup "
-    right = f"{os.path.relpath(CONFIG, REPO)}  \u00b7  {overridden} overriding a default "
-    if self.dirty:
-      right = "\u25cf unsaved  \u00b7  " + right
+    title = " BEAMPILOT CONFIG "
+    overridden = self.override_count()
+    state = "\u25cf UNSAVED" if self.dirty else "saved"
+    right = f" {state}  \u00b7  {overridden} custom  \u00b7  {os.path.relpath(CONFIG, REPO)} "
     self.put(0, 0, " " * (w - 1), curses.A_REVERSE)
     self.put(0, 0, title, curses.A_REVERSE | curses.A_BOLD)
-    self.put(0, max(len(title) + 1, w - 1 - len(right)), right, curses.A_REVERSE)
-    self.put(1, 1, _fit(f"GPUs: {gpu_detail()}", w - 3), curses.A_DIM)
+    right_room = max(0, w - len(title) - 2)
+    right = _fit(right, right_room)
+    self.put(0, max(len(title), w - 1 - len(right)), right, curses.A_REVERSE)
 
-    top = 3
-    foot = 6                      # rule + help (2) + detail + status + keys
-    avail = max(1, h - top - foot)
+    if h < 12 or w < 48:
+      self.put(3, 2, "Terminal too small for the config editor.",
+               curses.A_BOLD | curses.color_pair(3), w)
+      self.put(5, 2, f"Current: {w}x{h}  \u00b7  minimum: 48x12", curses.A_DIM, w)
+      self.put(h - 1, 0, " q quit ".ljust(max(0, w - 1)), curses.A_REVERSE, w)
+      self.stdscr.refresh()
+      return
 
-    # Scroll by LINES, not by rows: a section header costs three of them (a
-    # blank line, the heading and its rule), so counting rows walked the cursor
-    # off the bottom of a long list and settings simply could not be seen.
-    def cost(idx):
-      return 3 if self.rows[idx][0] == "section" else 1
+    sidebar_w = 25 if w >= 104 and h >= 22 else 0
+    main_x = sidebar_w + 1 if sidebar_w else 0
+    footer_lines = 8 if h >= 21 else 6
+    footer_start = h - footer_lines
+    top = 5
+    avail = max(1, footer_start - top)
+    section = self.active_section()
+    section_num = self.active_section_index() + 1
+    indices = self.setting_indices(section)
+    cursor_pos = indices.index(self.cursor)
+    self.scroll = max(0, min(self.scroll, max(0, len(indices) - avail)))
+    if cursor_pos < self.scroll:
+      self.scroll = cursor_pos
+    elif cursor_pos >= self.scroll + avail:
+      self.scroll = cursor_pos - avail + 1
+    visible = indices[self.scroll:self.scroll + avail]
 
-    if self.cursor < self.scroll:
-      self.scroll = self.cursor
-    while self.scroll < self.cursor and sum(cost(i) for i in range(self.scroll, self.cursor + 1)) > avail:
-      self.scroll += 1
-    while self.scroll > 0 and sum(cost(i) for i in range(self.scroll - 1, self.cursor + 1)) <= avail:
-      self.scroll -= 1
+    if sidebar_w:
+      self.draw_sidebar(sidebar_w, footer_start)
 
-    y = top
-    last = self.scroll
-    for idx in range(self.scroll, len(self.rows)):
-      if y + cost(idx) > top + avail:
-        break
-      last = idx
-      kind, obj = self.rows[idx]
-      if kind == "section":
-        if y > top:
-          y += 1
-        self.put(y, 2, obj.name.upper(), curses.A_BOLD | curses.color_pair(4), w)
-        self.put(y, 2 + len(obj.name) + 3, _fit(obj.blurb, w - len(obj.name) - 8),
-                 curses.A_DIM, w)
-        y += 1
-        self.put(y, 2, "\u2500" * max(0, w - 5), curses.A_DIM, w)
-        y += 1
-        continue
+    label_w, value_w, source_w, lx, vx, nx = self.layout(w, main_x)
+    first = self.scroll + 1 if visible else 0
+    progress = f"{first}-{self.scroll + len(visible)} / {len(indices)}"
+    heading = f"{section_num}/{len(self.sections)}  {section.name.upper()}"
+    self.put(1, main_x + 2,
+             _fit(f"GPU: {self.gpu_summary}  \u00b7  defaults remain controlled by the code",
+                  w - main_x - 4), curses.A_DIM, w)
+    self.put(2, main_x + 2, heading, curses.A_BOLD | curses.color_pair(4), w)
+    if w - main_x - len(heading) > len(progress) + 6:
+      self.put(2, w - len(progress) - 2, progress, curses.A_DIM, w)
+    self.put(3, main_x + 2, _fit(section.blurb, w - main_x - 4), curses.A_DIM, w)
+    self.put(4, lx, "SETTING", curses.A_DIM | curses.A_BOLD, w)
+    self.put(4, vx, "VALUE", curses.A_DIM | curses.A_BOLD, w)
+    if nx:
+      self.put(4, nx, "SOURCE", curses.A_DIM | curses.A_BOLD, w)
 
+    row_width = max(1, w - main_x - 1)
+    for y, idx in enumerate(visible, top):
+      _, obj = self.rows[idx]
       val = self.values.get(obj.key, self.defaults.get(obj.key, obj.default))
-      default = self.defaults.get(obj.key, obj.default)
       changed = not obj.is_default(val, self.values)
       sel = idx == self.cursor
       shown = display_value(obj, val)
-
       row_attr = curses.A_REVERSE if sel else curses.A_NORMAL
-      # Colour says what the value IS; the right-hand column says where it came
-      # from. Keeping those two separate is the point -- "off" and "at the
-      # default" are different facts and used to be conflated into one colour.
-      if shown == "off":
-        vattr = curses.color_pair(5)
+      if obj.warn and changed:
+        vattr = curses.color_pair(3)
       elif shown == "on":
         vattr = curses.color_pair(4)
+      elif shown == "off":
+        vattr = curses.A_DIM
       elif changed:
         vattr = curses.color_pair(2)
       else:
@@ -1055,64 +1076,77 @@ class Tui:
       if sel:
         vattr = curses.A_REVERSE
 
-      self.put(y, 0, " " * (w - 1), row_attr, w)
-      self.put(y, 1, "\u25b8" if sel else " ", row_attr | curses.A_BOLD, w)
+      self.put(y, main_x, " " * row_width, row_attr, w)
+      self.put(y, main_x + 1, "\u25b8" if sel else " ", row_attr | curses.A_BOLD, w)
       self.put(y, lx, _fit(obj.label, label_w).ljust(label_w), row_attr, w)
       self.put(y, vx, _fit(shown, value_w), vattr | curses.A_BOLD, w)
       if nx:
-        if not changed:
-          note, nattr = "default", curses.A_DIM
+        source = self.source_label(obj)
+        if source == "\u25cf unsaved":
+          nattr = curses.color_pair(3)
+        elif source == "custom":
+          nattr = curses.color_pair(2)
         else:
-          note = f"set \u00b7 default {_fit(display_value(obj, default) or 'unset', 14)}"
-          nattr = curses.color_pair(3) if obj.warn else curses.color_pair(2)
-        if self.unsaved(obj.key):
-          note = "\u25cf " + note
-        self.put(y, nx, _fit(note, w - nx - 2), nattr | (curses.A_REVERSE if sel else 0), w)
-      y += 1
+          nattr = curses.A_DIM
+        self.put(y, nx, _fit(source, source_w),
+                 nattr | (curses.A_REVERSE if sel else 0), w)
 
-    # scroll hints, so a list longer than the window says so
-    if self.scroll > 0:
-      self.put(top - 1, w - 14, "\u25b2 more above", curses.A_DIM, w)
-    if last < len(self.rows) - 1:
-      self.put(top + avail, w - 14, "\u25bc more below", curses.A_DIM, w)
-
-    self.draw_footer(h, w)
+    self.draw_footer(h, w, footer_start, main_x)
     self.stdscr.refresh()
 
-  def draw_footer(self, h, w):
-    hy = h - 5
-    self.put(hy - 1, 0, "\u2500" * (w - 1), curses.A_DIM, w)
+  def draw_footer(self, h, w, start_y, origin=0):
+    self.put(start_y, origin, "\u2500" * (w - origin - 1), curses.A_DIM, w)
     cur = self.current()
     if cur:
-      wrapped = textwrap.wrap(cur.help or "", max(20, w - 6))[:2]
-      for i, line in enumerate(wrapped):
-        self.put(hy + i, 2, line, curses.A_DIM, w)
-      val = self.values.get(cur.key, "")
+      val = self.values.get(cur.key, self.defaults.get(cur.key, cur.default))
       default = self.defaults.get(cur.key, cur.default)
-      if not cur.is_default(val, self.values):
-        detail = (f"{cur.key}={val or '\u2205'}  \u00b7  overrides the default of "
-                  + f"{default or 'unset'}  \u00b7  written to the config")
-        attr = curses.color_pair(3) if cur.warn else curses.color_pair(2)
-        if cur.warn:
-          detail += f"  \u00b7  ! {cur.warn}"
-      elif cur.key in self.in_file:
-        detail = (f"{cur.key}={val or '\u2205'}  \u00b7  the default  \u00b7  "
-                  + "spelled out in the config, which is harmless but pins it")
-        attr = curses.A_DIM
-      else:
-        detail = (f"{cur.key}={val or '\u2205'}  \u00b7  the default  \u00b7  "
-                  + "not in the config, so the code decides")
-        attr = curses.A_DIM
-      if self.unsaved(cur.key):
-        detail = f"unsaved ({self.on_disk.get(cur.key) or '\u2205'} on disk)  \u00b7  " + detail
-      self.put(hy + 2, 2, _fit(detail, w - 4), attr, w)
+      shown = display_value(cur, val)
+      value_badge = f"[ {shown} ]"
+      label_room = max(1, w - origin - len(value_badge) - 7)
+      self.put(start_y + 1, origin + 2, _fit(cur.label, label_room), curses.A_BOLD, w)
+      self.put(start_y + 1, w - len(value_badge) - 2, value_badge,
+               curses.A_BOLD | curses.color_pair(2), w)
 
-    keys = (" \u2191\u2193 move   \u2190\u2192/enter change   d default   tab section"
-            + "   / find   s save   r setup   L launch   m monitor   q quit ")
+      help_lines = max(1, h - start_y - 5)
+      wrapped = textwrap.wrap(cur.help or "No description for this setting.",
+                              max(20, w - origin - 6))[:help_lines]
+      for i, line in enumerate(wrapped):
+        self.put(start_y + 2 + i, origin + 2, line, curses.A_DIM, w)
+
+      meta_y = start_y + 2 + help_lines
+      source = self.source_label(cur)
+      detail = (f"{cur.key}  \u00b7  current {val or '\u2205'}  \u00b7  "
+                + f"default {default or '\u2205'}  \u00b7  {source}")
+      if source == "\u25cf unsaved" or (cur.warn and source == "custom"):
+        attr = curses.color_pair(3)
+      elif source == "custom":
+        attr = curses.color_pair(2)
+      else:
+        attr = curses.A_DIM
+      self.put(meta_y, origin + 2, _fit(detail, w - origin - 4), attr, w)
+
+      info_y = min(h - 2, meta_y + 1)
+      if self.status:
+        info, info_attr = self.status, curses.A_BOLD | curses.color_pair(4)
+      elif cur.warn and not cur.is_default(val, self.values):
+        info, info_attr = "! " + cur.warn, curses.A_BOLD | curses.color_pair(3)
+      else:
+        action = "Enter cycles choices" if cur.choices else "Enter edits the value"
+        info = (f"{action}  \u00b7  1-9 jump to section  \u00b7  / find  \u00b7  "
+                + "r setup  \u00b7  L launch  \u00b7  m monitor")
+        info_attr = curses.A_DIM
+      self.put(info_y, origin + 2, _fit(info, w - origin - 4), info_attr, w)
+
+    if w >= 90:
+      keys = (" \u2191\u2193 move   \u2190\u2192 change   Enter edit   Tab section"
+              + "   1-9 jump   / find   d default   s save   q quit ")
+    elif w >= 65:
+      keys = (" \u2191\u2193 move   \u2190\u2192 change   Enter edit   Tab section"
+              + "   d default   s save   q quit ")
+    else:
+      keys = " \u2191\u2193 move   \u2190\u2192 change   Tab section   s save   q quit "
     self.put(h - 1, 0, " " * (w - 1), curses.A_REVERSE, w)
     self.put(h - 1, 0, _fit(keys, w - 1), curses.A_REVERSE, w)
-    if self.status:
-      self.put(hy + 3, 2, _fit(self.status, w - 4), curses.A_BOLD | curses.color_pair(4), w)
 
   # ---------------------------------------------------------------- loop --
 
@@ -1126,11 +1160,14 @@ class Tui:
       cur = self.current()
       self.status = ""
       if ch in (ord('q'), 27):
-        if self.dirty:
+        if self.dirty and not self.quit_armed:
           self.status = "unsaved changes -- s to save, or q again to discard"
-          self.dirty = False
+          self.quit_armed = True
           continue
         return
+      self.quit_armed = False
+      if ord('1') <= ch <= ord('9'):
+        self.select_section(ch - ord('1'))
       elif ch in (curses.KEY_DOWN, ord('j')):
         self.move(1)
       elif ch in (curses.KEY_UP, ord('k')):
