@@ -396,16 +396,16 @@ zone is measured off your own car, so it fits whatever you spawn. Defaults follo
 
 | | |
 |---|---|
-| **Mirror lamps** | Amber chevrons at the edges of the road view. Steady when a car is there, flashing while you're signalling into it. Nothing is drawn when both sides are clear. |
 | **"Car Detected in Blindspot"** | openpilot's own alert, now reachable. |
 | **"Lane Change Cancelled"** | 3 s, when one already under way is aborted. Kept distinct because *blocked* reads as "it never started". |
+| **Mirror lamps** (`BEAMPILOT_BSM_INDICATOR`, **off**) | Amber chevrons at the edges of the road view — steady when a car is there, flashing while you're signalling into it. Off by default because the [radar markers](#ground-truth-radar) already occupy the road view. Worth turning on if you run with the radar off. |
 
 The chime is muted — `soundd` is in `BLOCK`. Remove it if you want the sound.
 
 | Setting | Default | |
 |---|---|---|
 | `BEAMPILOT_BSM` | `1` | Master switch. |
-| `BEAMPILOT_BSM_INDICATOR` | `1` | The mirror lamps. `0` still gates lane changes, just shows nothing. |
+| `BEAMPILOT_BSM_INDICATOR` | `0` | The mirror lamps. Gating and alerts happen either way. |
 | `BEAMPILOT_LANE_CHANGE_ABORT` | `1` | Cancel a change already in progress. |
 | `BEAMPILOT_LANE_CHANGE_ABORT_S` | `2.0` | How late a cancel may still fire. High = any time. |
 | `BEAMPILOT_SIGNAL_AUTO_CANCEL` | `1` | Drop the blinker once a change finishes. |
@@ -450,6 +450,7 @@ into the `RadarData` it was already publishing. Everything downstream is stock `
 | `BEAMPILOT_RADAR_MAX_TRACKS` | `12` | Nearest first; the rest dropped. Wire format caps at 24. |
 | `BEAMPILOT_RADAR_RATE_HZ` | `20` | `DT_MDL` — `radard` runs at the model's rate. |
 | `BEAMPILOT_RADAR_PORT` | `49155` | Mod → `card`, loopback. |
+| `BEAMPILOT_RADAR_INDICATOR` | `1` | Draw the tracks on the road view. See below. |
 | `BEAMPILOT_RADAR_DEBUG` | `0` | Log the nearest track every scan. |
 
 **About `BEAMPILOT_RADAR_LEADS`.** Stock `radard` ignores radar unless the camera already reports
@@ -461,8 +462,25 @@ nothing for the case that actually hurts: the model missing one. The risk is pic
 next lane on a bend, so the in-lane test is measured against the model's predicted path rather
 than straight ahead. Set to `0` for stock fusion.
 
-The **lead car** line in `tools/beampilot_monitor.py` shows whether the lead came from ground
-truth or the camera.
+#### What you see
+
+A cyan diamond on the road under every track, ringed on whichever one `radard` picked as the
+lead. Projected through the same calibration as the model's path, so the markers land where the
+model thinks the road is. Nothing is drawn when there are no tracks, so with `BEAMPILOT_RADAR`
+off this is invisible.
+
+```
+                    ◆        ◆            <- distant tracks, smaller
+              ◆
+                  ( ◆ )                   <- the lead radard settled on
+```
+
+This is the bit a lead chevron can't do: a missing chevron could mean no traffic, no radar feed,
+a stale mod, or a lead the model rejected. Markers tell those apart at a glance.
+`BEAMPILOT_RADAR_INDICATOR=0` turns it off.
+
+The **lead car** line in `tools/beampilot_monitor.py` also shows whether the lead came from
+ground truth or the camera.
 
 ### Vehicles
 

@@ -42,6 +42,9 @@ class UIState:
         "onroadEvents",
         "extrinsicsCalibration",
         "radarState",
+        # beampilot: the ground-truth radar's individual tracks, for
+        # RadarRenderer. radarState only carries the two leads.
+        "radarTracks",
         "deviceState",
         "pandaStates",
         "carParams",

@@ -54,10 +54,12 @@ PLATE_PAD = 0.22          # backing plate padding, relative to chevron height
 EDGE_MARGIN = 0.025       # in from the edge, as a fraction of the view WIDTH
 FLASH_HZ = 2.5            # a real BSM lamp flashes at roughly this rate
 
-# The lamps are already invisible whenever both sides are clear, so this is not
-# needed to get them out of the way -- it is for anyone who wants the blind spot
-# to keep gating lane changes without anything appearing on screen for it.
-BSM_INDICATOR = env_bool("BEAMPILOT_BSM_INDICATOR", True)
+# Off by default: the road view already carries the radar markers, and two
+# overlays competing for the same screen is worse than either alone. The blind
+# spot still gates lane changes and still raises "Car Detected in Blindspot" --
+# only the lamps go away. Turn this on to get them back; worth doing if you run
+# with BEAMPILOT_RADAR off, since nothing else then shows the blind spot at all.
+BSM_INDICATOR = env_bool("BEAMPILOT_BSM_INDICATOR", False)
 
 
 class BlindSpotRenderer(Widget):

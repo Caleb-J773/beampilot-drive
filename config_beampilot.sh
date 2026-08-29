@@ -173,8 +173,11 @@ export BEAMPILOT_BSM_APPROACHING="1"
 
 # The on-screen blind spot indicator: amber chevrons at the edges of the road
 # view, steady when a car is there and flashing when you are signalling into it.
-# 0 keeps the blind spot gating lane changes with nothing shown for it.
-export BEAMPILOT_BSM_INDICATOR="1"
+# Off by default because the radar markers already occupy the road view and two
+# overlays at once is worse than either. The blind spot still gates lane changes
+# and still raises "Car Detected in Blindspot" either way. Turn it on if you run
+# with BEAMPILOT_RADAR off, since nothing else then shows the blind spot.
+export BEAMPILOT_BSM_INDICATOR="0"
 
 # Log every blind spot state change to the BeamNG console and the beamngd
 # terminal. Turn this on when tuning the zone.
@@ -221,6 +224,12 @@ export BEAMPILOT_RADAR_LEADS="1"
 # export BEAMPILOT_RADAR_RATE_HZ="20"         # DT_MDL; radard runs at the model's rate
 # export BEAMPILOT_RADAR_PORT="49155"         # mod -> card, loopback only
 # export BEAMPILOT_RADAR_DEBUG="1"            # log the nearest track every scan
+
+# Draw the radar's tracks on the road view: a cyan diamond under every track,
+# ringed on whichever one radard picked as the lead. Projected through the same
+# calibration the model's path uses, so the markers land where the model thinks
+# the road is. Nothing is drawn when there are no tracks.
+export BEAMPILOT_RADAR_INDICATOR="1"
 
 # Processes not to start. manager.py:114 treats every comma-separated name here
 # as blocked.

@@ -72,7 +72,8 @@ CAN only flows **into** openpilot (fake sensors), never back into the game.
 | `openpilot/selfdrive/beamngd/test_radar.py` | radar wire format, receiver, and a cross-language check against the real Lua encoder |
 | `openpilot/selfdrive/beamngd/test_carstate_signals.py` | gear / parking brake / steering rate round-tripped through the Honda DBC |
 | `openpilot/selfdrive/controls/test_radard_beampilot.py` | radar-only lead selection, including the in-lane test on a bend |
-| `openpilot/selfdrive/ui/onroad/blindspot_renderer.py` | the onroad mirror lamps (amber chevrons, steady/flashing) |
+| `openpilot/selfdrive/ui/onroad/blindspot_renderer.py` | the onroad mirror lamps (amber chevrons, steady/flashing; OFF by default) |
+| `openpilot/selfdrive/ui/onroad/radar_renderer.py` | radar tracks drawn on the road, ringed on the lead |
 | `tools/beamng_mod/test_beampilot_bsm.lua` | BSM zone geometry tests against BeamNG's real `mathlib` (`luajit ...`) |
 | `openpilot/tools/sim/lib/simulated_car.py` | fake Honda CAN packing (shared with MetaDrive bridge) |
 | `openpilot/tools/sim/lib/simulated_sensors.py` | fake IMU/GPS/DM publishing (shared) |
@@ -210,6 +211,12 @@ These were each a real bug that cost significant debugging time. Don't regress t
   "custom UI extension point"; a widget subclasses `Widget` and gets `_update_state()` called
   from `render()` for free. Size everything as a fraction of the passed rect — the UI runs at
   2160x1080 (`BIG=1`) or 536x240 (`BIG=0`), times `SCALE`.
+- **Project UI markers with ModelRenderer's transform, and give them a FIXED shape.** Car space
+  is x-forward, y-RIGHT, z-DOWN with the road at `extrinsicsCalibration.height`, and radar yRel
+  is LEFT positive, so the projection takes `-yRel`. Size from the projected footprint (correct
+  perspective) but do NOT let the marker flatten with it: a diamond lying on the road plane is
+  edge-on past ~30m and renders as a dash. openpilot's own lead chevron stands up for the same
+  reason.
 - **`rl.draw_line_ex` has butt caps**, so two strokes meeting at a point leave a notch. Cap it
   with a disc — and dim by colour value, never alpha, or the overlap composites into a bright
   spot exactly where the disc is.

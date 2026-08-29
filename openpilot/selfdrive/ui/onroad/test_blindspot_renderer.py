@@ -38,10 +38,15 @@ class FakeUIState:
 class TestBlindSpotRenderer(unittest.TestCase):
   def setUp(self):
     self.previous = br.ui_state
+    # The lamps ship OFF -- the radar markers own the road view now -- so these
+    # tests have to turn them on to exercise the logic at all.
+    self.previous_flag = br.BSM_INDICATOR
+    br.BSM_INDICATOR = True
     self.renderer = br.BlindSpotRenderer()
 
   def tearDown(self):
     br.ui_state = self.previous
+    br.BSM_INDICATOR = self.previous_flag
 
   def update(self, left=False, right=False, state=LaneChangeState.off,
              direction=LaneChangeDirection.none, started=True, started_frame=0):
@@ -82,15 +87,18 @@ class TestBlindSpotRenderer(unittest.TestCase):
     self.assertEqual(state, (True, False, False, False))
 
   def test_the_lamps_can_be_switched_off_entirely(self):
-    previous = br.BSM_INDICATOR
-    try:
-      br.BSM_INDICATOR = False
-      # The blind spot still gates lane changes; only the display goes away.
-      self.assertEqual(self.update(left=True, right=True, state=LaneChangeState.preLaneChange,
-                                   direction=LaneChangeDirection.left),
-                       (False, False, False, False))
-    finally:
-      br.BSM_INDICATOR = previous
+    br.BSM_INDICATOR = False
+    # The blind spot still gates lane changes; only the display goes away.
+    self.assertEqual(self.update(left=True, right=True, state=LaneChangeState.preLaneChange,
+                                 direction=LaneChangeDirection.left),
+                     (False, False, False, False))
+
+  def test_off_is_the_shipped_default(self):
+    # Two overlays competing for the road view is worse than either alone, so
+    # the radar markers win by default. Changing this is a UX decision, not a
+    # tidy-up -- hence a test.
+    from openpilot.common.beampilot_env import env_bool
+    self.assertFalse(env_bool("BEAMPILOT_BSM_INDICATOR", False))
 
   def test_nothing_before_the_car_starts(self):
     self.assertEqual(self.update(left=True, right=True, started=False), (False, False, False, False))

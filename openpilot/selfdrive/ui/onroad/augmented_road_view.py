@@ -9,6 +9,7 @@ from openpilot.selfdrive.ui.onroad.blindspot_renderer import BlindSpotRenderer
 from openpilot.selfdrive.ui.onroad.driver_state import DriverStateRenderer
 from openpilot.selfdrive.ui.onroad.hud_renderer import HudRenderer
 from openpilot.selfdrive.ui.onroad.model_renderer import ModelRenderer
+from openpilot.selfdrive.ui.onroad.radar_renderer import RadarRenderer
 from openpilot.selfdrive.ui.onroad.cameraview import CameraView
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.common.transformations.camera import DEVICE_CAMERAS, DeviceCameraConfig, view_frame_from_device_frame
@@ -49,6 +50,7 @@ class AugmentedRoadView(CameraView):
     self.alert_renderer = AlertRenderer()
     self.driver_state_renderer = DriverStateRenderer()
     self.blindspot_renderer = BlindSpotRenderer()
+    self.radar_renderer = RadarRenderer()
 
   def _render(self, rect):
     # Only render when system is started to avoid invalid data access
@@ -89,9 +91,10 @@ class AugmentedRoadView(CameraView):
     # Custom UI extension point - add custom overlays here
     # Use self._content_rect for positioning within camera bounds
 
-    # beampilot: blind spot lamps. Drawn last so they sit over the model's path
-    # rendering, and self-hiding when both sides are clear -- on a car with no
-    # blind spot feed this draws nothing at all.
+    # beampilot: the ground-truth radar's tracks, on the road under the model's
+    # path, then the blind spot lamps over everything. Both self-hide when they
+    # have nothing to show, so a build with neither feed draws neither.
+    self.radar_renderer.render(self._content_rect)
     self.blindspot_renderer.render(self._content_rect)
 
     # End clipping region
@@ -213,7 +216,11 @@ class AugmentedRoadView(CameraView):
       [0.0, zoom, (h / 2 + y - y_offset) - (cy * zoom)],
       [0.0, 0.0, 1.0]
     ])
-    self.model_renderer.set_transform(video_transform @ calib_transform)
+    car_space_transform = video_transform @ calib_transform
+    self.model_renderer.set_transform(car_space_transform)
+    # beampilot: the radar markers are projected the same way as the model's
+    # path, so they land where the model thinks the road is.
+    self.radar_renderer.set_transform(car_space_transform)
 
     return self._cached_matrix
 

@@ -194,10 +194,11 @@ def build_sections() -> list[Section]:
       Setting("BEAMPILOT_BSM_REAR_M", "Zone rear reach (m)",
               "How far past your rear bumper the zone extends.",
               "4.0", numeric=True, step=0.5),
-      Setting("BEAMPILOT_BSM_INDICATOR", "On-screen indicator",
-              "The amber chevrons at the edges of the road view. Off keeps the blind spot gating lane"
-              + " changes with nothing shown for it. Already invisible whenever both sides are clear.",
-              "1", choices=["1", "0"]),
+      Setting("BEAMPILOT_BSM_INDICATOR", "Mirror lamps",
+              "Amber chevrons at the edges of the road view. Off by default because the radar markers"
+              + " already occupy that space. The blind spot still gates lane changes and still raises"
+              + " its alert either way. Worth turning on if you run with the radar off.",
+              "0", choices=["0", "1"]),
       Setting("BEAMPILOT_BSM_DEBUG", "Log state changes",
               "Prints every blind spot change to the beamngd terminal and the BeamNG console. For tuning the zone.",
               "0", choices=["0", "1"]),
@@ -231,6 +232,11 @@ def build_sections() -> list[Section]:
       Setting("BEAMPILOT_RADAR_MAX_TRACKS", "Max tracks",
               "Nearest first; anything past this is dropped. Hard ceiling of 24 in the wire format.",
               "12", numeric=True, step=1.0),
+      Setting("BEAMPILOT_RADAR_INDICATOR", "Show tracks on screen",
+              "A cyan diamond on the road under every radar track, ringed on whichever one radard picked"
+              + " as the lead. Projected through the same calibration as the model's path. This is how you"
+              + " tell 'no traffic' apart from 'the feed is dead' -- a missing lead chevron cannot.",
+              "1", choices=["1", "0"]),
       Setting("BEAMPILOT_RADAR_DEBUG", "Log the nearest track",
               "Prints the closest track to the BeamNG console every scan. Noisy in traffic; for checking"
               + " the mod sees what you think it does.",
