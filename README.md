@@ -246,6 +246,46 @@ Too low makes openpilot oversteer, too high makes it run wide.
 > `NO_ENTRY` and `SOFT_DISABLE`, so suppressing it means openpilot keeps steering on stale model
 > output if `modeld` stalls or dies, instead of handing back control. The event is still logged.
 
+### Vehicles
+
+Tested and working to some degree:
+
+| Vehicle | Notes |
+|---|---|
+| **ETK series** (800, I, K) | Best results. The camera framing was tuned against these, and the hood sits where the model expects it. |
+| **Bastion** | Works. |
+| **SBR4** | Works. |
+| **Sunburst** | Works. |
+
+> [!NOTE]
+> **Outside the ETK series the framing is off.** Other cars show less of the hood and the view is
+> clipped slightly, because `openpilot_cam`'s offsets are fixed rather than per-vehicle. It still
+> drives, but the model has less of the visual context it was trained on. If a car behaves badly,
+> that framing is the first thing to suspect — nudge `offUp`/`offFwd` in
+> `tools/beamng_mod/openpilot_cam/lua/ge/extensions/core/cameraModes/openpilot.lua`.
+
+Each vehicle also has its own steering lock, so set `BEAMPILOT_STEER_LOCK_DEG` when you switch
+cars (hold full lock and read `steering_wheel_deg` in the monitor).
+
+<details>
+<summary><b>Using BeamNG's dashboard camera instead</b></summary>
+
+The stock dashboard view can work as a capture source, but it's a downgrade:
+
+- **Heavy motion blur.** You'll almost certainly want to turn it off in BeamNG's graphics
+  settings — the driving model was trained on sharp frames, and blur during exactly the moments
+  that matter (turning, braking) is the worst possible time to lose detail.
+- **It generally performs worse** than `openpilot_cam`. That camera exists because openpilot's
+  model assumes a rigidly-mounted lens with fixed intrinsics; every comfort feature of a normal
+  in-game camera — head bob, look-ahead yaw, horizon stabilisation, FOV smoothing — violates
+  that assumption. `openpilot_cam` deliberately has none of them and matches openpilot's
+  road-camera vertical FOV of 25.70°.
+
+If you do use it, note that `beampilot.lua` auto-selects `openpilot` at spawn, so you'd have to
+remove that call or switch cameras manually after it runs.
+
+</details>
+
 ### Camera capture
 
 `beamcamd` picks a capture region in this order:
@@ -688,7 +728,9 @@ About **1,650 lines across 22 files**.
   `evdev`, converts desired curvature to BeamNG steering via `VehicleModel`.
 - **`beamcamd`** — real capture pipeline (mss + OpenCV NV12). Meets its 20 Hz target; was
   managing 15.3 Hz before optimisation.
-- **The BeamNG mod** — new.
+- **The BeamNG mods** — `beampilot_bridge` (telemetry and control) is new; `openpilot_cam` (the
+  rigid, FOV-matched camera) is now bundled in the repo and installed automatically, rather than
+  being a separate thing you had to already have.
 - **`abeamngd.py`** — deleted; depended on the unavailable `beamngpy`.
 - **Window-tracking capture** — `window_capture.py` finds the game window instead of grabbing a
   whole monitor, and follows it as it moves.

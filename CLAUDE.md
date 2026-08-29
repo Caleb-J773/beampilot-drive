@@ -43,7 +43,8 @@ CAN only flows **into** openpilot (fake sensors), never back into the game.
 |---|---|
 | `openpilot/selfdrive/beamngd/beamngd.py` | bridge: telemetry in, fake CAN/IMU/GPS out, control out |
 | `openpilot/selfdrive/beamcamd/beamcamd.py` | screen capture → VisionIPC camera frames |
-| `tools/beamng_mod/beampilot_bridge/lua/vehicle/protocols/beampilot.lua` | the BeamNG mod |
+| `tools/beamng_mod/beampilot_bridge/lua/vehicle/protocols/beampilot.lua` | the BeamNG mod: telemetry out, control in |
+| `tools/beamng_mod/openpilot_cam/lua/ge/.../openpilot.lua` | rigid, FOV-matched camera (25.70° vertical). **Required** — `beampilot.lua` selects it by name at spawn |
 | `openpilot/tools/sim/lib/simulated_car.py` | fake Honda CAN packing (shared with MetaDrive bridge) |
 | `openpilot/tools/sim/lib/simulated_sensors.py` | fake IMU/GPS/DM publishing (shared) |
 | `config_beampilot.sh` | car fingerprint, GPU backend, UI size |
@@ -166,6 +167,24 @@ Consequences:
 Proper fix: a second BeamNG camera at a genuinely wide FOV, published to
 `VISION_STREAM_WIDE_ROAD` separately. The `openpilot_cam` mod already shows how to register a
 rigidly-mounted, FOV-matched camera; a second one plus a second capture region would do it.
+
+## Vehicles
+
+Tested working: **ETK series** (best — the camera framing was tuned on these), **Bastion**,
+**SBR4**, **Sunburst**.
+
+`openpilot_cam`'s offsets are fixed, not per-vehicle, so outside the ETK series less of the hood
+is visible and the view clips slightly. It still drives, but the model gets less of the visual
+context it was trained on — suspect framing first when a particular car behaves badly, and tune
+`offUp`/`offFwd` in the camera mod.
+
+Steering lock is per-vehicle: set `BEAMPILOT_STEER_LOCK_DEG` when switching cars (hold full lock,
+read `steering_wheel_deg` in the monitor).
+
+BeamNG's stock dashboard camera can be used instead, but performs worse and carries heavy motion
+blur (disable it in graphics settings). `openpilot_cam` exists precisely because openpilot assumes
+a rigid lens with fixed intrinsics — head bob, look-ahead yaw, horizon stabilisation and FOV
+smoothing all violate that, and it has none of them.
 
 ## Known outstanding issues
 

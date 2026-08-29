@@ -18,6 +18,11 @@ import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+# Both are required. beampilot_bridge carries telemetry and control;
+# openpilot_cam is the rigidly-mounted, FOV-matched camera that beampilot.lua
+# selects by name at spawn.
+MODS = ("beampilot_bridge", "openpilot_cam")
+
 GREEN, RED, YELLOW, BLUE, DIM, BOLD, RESET = (
   "\033[32m", "\033[31m", "\033[33m", "\033[36m", "\033[2m", "\033[1m", "\033[0m")
 
@@ -333,36 +338,45 @@ def check_beamng():
     print(f"  {FAIL} userfolder not found -- launch BeamNG.drive once, then re-run this")
     return None, None
 
-  mod = os.path.join(userdir, "mods", "unpacked", "beampilot_bridge")
-  src = os.path.join(REPO, "tools", "beamng_mod", "beampilot_bridge")
-  if os.path.islink(mod) and os.path.realpath(mod) == os.path.realpath(src):
-    print(f"  {OK} mod installed (symlink -> repo, edits apply live)")
-  elif os.path.exists(mod):
-    print(f"  {WARN} mod path exists but is not a link to this repo: {mod}")
-  else:
-    print(f"  {INFO} mod not installed yet")
-  return userdir, mod
+  missing = []
+  for name in MODS:
+    mod = os.path.join(userdir, "mods", "unpacked", name)
+    src = os.path.join(REPO, "tools", "beamng_mod", name)
+    if os.path.islink(mod) and os.path.realpath(mod) == os.path.realpath(src):
+      print(f"  {OK} {name} installed (symlink -> repo, edits apply live)")
+    elif os.path.exists(mod):
+      print(f"  {WARN} {name} exists but is not a link to this repo: {mod}")
+    else:
+      print(f"  {INFO} {name} not installed yet")
+      missing.append(name)
+  return userdir, missing
 
 
-def install_mod(userdir, mod):
-  src = os.path.join(REPO, "tools", "beamng_mod", "beampilot_bridge")
-  if not os.path.isdir(src):
-    print(f"  {FAIL} mod source missing at {src}")
-    return
-  try:
-    os.makedirs(os.path.dirname(mod), exist_ok=True)
-    if os.path.islink(mod) or os.path.exists(mod):
-      if not ask(f"{mod} already exists. Replace it?", default=False):
-        return
-      if os.path.islink(mod) or os.path.isfile(mod):
-        os.unlink(mod)
-      else:
-        shutil.rmtree(mod)
-    os.symlink(src, mod)
-    print(f"  {OK} linked {mod} -> {src}")
-    print(f"      {DIM}edits under tools/beamng_mod/ now apply live (Ctrl+L in game){RESET}")
-  except OSError as e:
-    print(f"  {FAIL} could not install mod: {e}")
+def install_mods(userdir, names):
+  """Both mods are required: beampilot_bridge does telemetry and control,
+  openpilot_cam provides the camera beampilot.lua selects by name. Without the
+  latter, that selection silently does nothing and beamcamd captures whatever
+  camera the player happened to be using."""
+  for name in names:
+    src = os.path.join(REPO, "tools", "beamng_mod", name)
+    mod = os.path.join(userdir, "mods", "unpacked", name)
+    if not os.path.isdir(src):
+      print(f"  {FAIL} mod source missing at {src}")
+      continue
+    try:
+      os.makedirs(os.path.dirname(mod), exist_ok=True)
+      if os.path.islink(mod) or os.path.exists(mod):
+        if not ask(f"{mod} already exists. Replace it?", default=False):
+          continue
+        if os.path.islink(mod) or os.path.isfile(mod):
+          os.unlink(mod)
+        else:
+          shutil.rmtree(mod)
+      os.symlink(src, mod)
+      print(f"  {OK} linked {name} -> {src}")
+    except OSError as e:
+      print(f"  {FAIL} could not install {name}: {e}")
+  print(f"      {DIM}edits under tools/beamng_mod/ now apply live (Ctrl+L in game){RESET}")
 
 
 def detect_window():
@@ -398,13 +412,14 @@ def main():
   check_display()
   check_python_deps()
   perms_ok = check_groups()
-  userdir, mod = check_beamng()
+  userdir, missing_mods = check_beamng()
   detect_window()
 
   hr("Next steps")
-  if userdir and mod and not os.path.islink(mod):
-    if ask("Install the BeamNG mod now?"):
-      install_mod(userdir, mod)
+  if userdir and missing_mods:
+    label = "mod" if len(missing_mods) == 1 else "mods"
+    if ask(f"Install the BeamNG {label} ({', '.join(missing_mods)}) now?"):
+      install_mods(userdir, missing_mods)
 
   if not perms_ok:
     print(f"  {WARN} fix the 'input' group before driving, or the cruise keys won't work")

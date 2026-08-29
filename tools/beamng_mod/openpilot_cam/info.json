@@ -1,0 +1,5 @@
+{
+  "name": "openpilot camera",
+  "authors": "openpilot-beamng bridge",
+  "description": "Rigidly mounted forward-facing camera with exact, unsmoothed FOV for feeding openpilot's driving model."
+}
