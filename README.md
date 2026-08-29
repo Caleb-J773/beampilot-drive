@@ -82,8 +82,21 @@ what it's going to touch, or install by hand.
 
 | Package | Needed for | Without it |
 |---|---|---|
-| `xdotool` | Finding and tracking the BeamNG window | Falls back to whole-monitor capture |
+| `xdotool` | Finding and tracking the BeamNG window (X11 backend) | Falls back to whole-monitor capture |
 | `xprop` (`x11-utils` on apt, `xorg-xprop` on Arch) | Filtering out non-game windows by class | Window matching is less reliable |
+| `gst-launch-1.0` + the PipeWire plugin | The `portal` capture backend | **Wayland cannot capture at all**; frames come out green |
+| A desktop portal for your compositor | The `portal` capture backend | Same |
+
+The portal backend needs, by distro:
+
+| Distro | Command |
+|---|---|
+| Debian/Ubuntu | `sudo apt install gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-pipewire xdg-desktop-portal-kde` (or `-gnome`, `-wlr`) |
+| Arch | `sudo pacman -S gstreamer gst-plugins-base gst-plugin-pipewire xdg-desktop-portal-kde` |
+| Fedora | `sudo dnf install gstreamer1 gstreamer1-plugins-base gstreamer1-plugin-pipewire xdg-desktop-portal-kde` |
+
+Pick the portal matching your desktop: `-kde` on KDE, `-gnome` on GNOME, `-wlr` on wlroots
+compositors (Sway, Hyprland).
 
 `tools/beampilot_setup.py` detects your package manager and offers to install these with the
 right package names for your distro.
@@ -234,9 +247,34 @@ crash.
 | Setting | Default | |
 |---|---|---|
 | `USE_NV` / `USE_AMD` | `USE_NV=1` | GPU backend. Set exactly one. |
+| `BEAMPILOT_GPU_INDEX` | auto-detected | Which GPU tinygrad uses. See below. |
 | `CHESTNUT` | `0` | Larger model. Needs 8 GB VRAM. |
 | `BIG` | `1` | Window resolution: `1` = 2160×1080 (comma 3/3X), `0` = 536×240 (comma 4). Not a scale knob. |
 | `SCALE` | unset | Multiplies the above. `0.6` ≈ 1296×648. |
+
+#### GPU selection
+
+tinygrad's backends are **not** CUDA or ROCm — they drive the card through raw ioctls, and each
+supports only a limited range of hardware:
+
+| Backend | Requires |
+|---|---|
+| `NV` | Compute capability **≥ 8.0** (Ampere or newer) |
+| `AMD` | **gfx942, gfx950, or gfx11xx/gfx12xx**, plus membership of the `render` group for `/dev/kfd` |
+
+An unsupported card is not merely slow — it cannot run the model at all, and the failure is
+obscure: `modeld` dies during model load with a bare `StopIteration` deep inside
+`tinygrad/runtime/ops_nv.py`, which surfaces only as
+`{"event": "process_not_running", "not_running": "{'modeld'}"}`.
+
+This bites on **mixed-GPU machines**, where tinygrad defaults to index 0 and index 0 may be the
+card it can't use. On the development machine a GTX 1660 SUPER (Turing, 7.5) enumerates ahead of
+an RTX 3060 (Ampere, 8.6), so the default was always wrong.
+
+`config_beampilot.sh` therefore detects the first usable card and sets tinygrad's
+`DEV=":<index>+NV"` (the index goes *before* the `+`). It detects rather than hardcodes because
+enumeration follows the PCI bus and shifts when cards are reseated. Override with
+`BEAMPILOT_GPU_INDEX`. `tools/beampilot_setup.py` prints each card with a verdict.
 
 ### Driving limits
 
@@ -404,7 +442,15 @@ remove that call or switch cameras manually after it runs.
 
 ### Camera capture
 
-`beamcamd` picks a capture region in this order:
+First, how the screen is read at all:
+
+| `BEAMPILOT_CAPTURE_BACKEND` | |
+|---|---|
+| `auto` (default) | X11 grab on an X11 session, desktop portal on Wayland. |
+| `portal` | Ask the compositor for a ScreenCast stream over PipeWire. Required on Wayland; also works, and measures smoother, on X11. See [Wayland](#wayland). |
+| `x11` | Force the classic X11 grab. On Wayland this yields all-green frames. |
+
+Under the X11 backend, `beamcamd` picks a capture region in this order:
 
 1. **`BEAMPILOT_CAM_REGION`** — a fixed `left,top,width,height` rectangle. Overrides everything.
 2. **`BEAMPILOT_CAM_WINDOW`** — track the BeamNG window. It follows the window as you move or
@@ -439,17 +485,69 @@ you can confirm it's about to grab the right thing.
 
 ### Wayland
 
-BeamNG.drive is an X11 client, so on a Wayland session it runs through XWayland, and capture
-usually works. "Usually" is doing real work in that sentence: whether an XWayland window's pixels
-are readable depends on your compositor.
+**Wayland is supported**, through `xdg-desktop-portal` and PipeWire. Wayland deliberately forbids
+a client from reading the screen, so there is no equivalent of an X11 grab: the only supported
+route is to ask the compositor, which prompts you to pick a window or monitor and then streams it.
 
-> [!WARNING]
-> Capturing **native Wayland** surfaces needs the `xdg-desktop-portal` ScreenCast API and a
-> PipeWire stream. **That is not implemented here.** If your frames come out black, log into an
-> X11/Xorg session.
+Set the backend and go:
 
-`tools/beampilot_setup.py` detects your session type and tells you which case you're in rather
-than leaving you to work it out from a black screen.
+```bash
+export BEAMPILOT_CAPTURE_BACKEND="portal"
+```
+
+`auto` (the default) already does this for you — it picks `portal` on a Wayland session and keeps
+X11 sessions on the X11 grab they have always used.
+
+**You get a share dialog once.** It appears at `beamcamd` startup, a few seconds into
+`launch_beampilot.sh`. The choice is remembered afterwards via a portal restore token, so later
+runs are silent. Two things worth knowing:
+
+- **Start BeamNG before the stack**, or its window won't be in the picker. Or just pick the
+  *monitor* it's fullscreen on — monitors are always listed, and the result is identical.
+- If BeamNG is fullscreen and holding focus, the dialog can end up behind it. Alt-tab to reach it.
+
+To choose a different source later, delete the token and relaunch:
+
+```bash
+rm ~/.local/state/beampilot/screencast_restore_token
+```
+
+Needs `gst-launch-1.0` with the PipeWire plugin, and a desktop portal for your compositor
+(`xdg-desktop-portal-kde` on KDE, `-gnome` on GNOME, `-wlr` on wlroots). See
+[Dependencies](#dependencies).
+
+> [!TIP]
+> **All-green frames mean the capture produced no data at all.** That is not a colour-conversion
+> bug: an untouched NV12 buffer is `Y=0, U=V=0`, which decodes to RGB(0,135,0). Real black would
+> be `Y=16, U=V=128`. So a green picture is the signature of an X11 grab returning nothing —
+> exactly what happens when the X11 backend is used on Wayland. Switch to `portal`. `beamcamd`
+> now detects a uniform frame and says this in the log rather than leaving you to guess.
+
+#### The portal backend on X11
+
+It works on X11 too, and it's worth considering there:
+
+- **Smoother.** Measured over 300 frames: 50.00 ms mean / 51.28 ms max, against 49.96 / 66.81 for
+  the X11 grab. The frame is already in memory from a reader thread instead of the capture loop
+  blocking on the X server.
+- **No window detection at all.** You pick the source from a dialog, so the whole
+  `xdotool`/`WM_CLASS`/title-matching problem below simply doesn't apply, and neither does
+  "it's capturing the wrong window".
+- GStreamer does the colour conversion and scaling, so `beamcamd` skips both.
+
+It is not the X11 default because it needs `gst-launch-1.0`, a working portal, and one dialog
+click, none of which the X11 grab requires.
+
+#### XWayland
+
+BeamNG is normally an X11 client even on Wayland (Proton/Wine defaults to Wine's X11 driver), so
+the X11 backend may appear to find the window. Finding it and capturing it are different things:
+window detection queries the X server, while capture has to read pixels the compositor owns.
+A found window with green frames is precisely this case.
+
+If detection itself fails, `python -m openpilot.selfdrive.beamcamd.window_capture` prints a full
+report and names the actual cause — game not running, `xdotool` missing, no `DISPLAY`, or a native
+Wayland window that X11 cannot see. On KDE it asks KWin directly to tell those apart.
 
 ## How it works
 
@@ -778,9 +876,15 @@ never runs there, since that driver is disabled.
 | `Address already in use` on 49152 | A previous `beamngd` still running | `pkill -f beamngd.py` |
 | Nothing publishing at all | Stack not running | `tools/beampilot_diag.py` |
 | Steering suddenly odd for no clear reason | Stale state somewhere in the stack | **Restart openpilot** (Ctrl+C, relaunch). BeamNG can keep running. |
-| Camera frames are black | Wayland compositor blocking capture | Use an X11 session — see [Wayland](#wayland) |
-| It's capturing the wrong window | Ambiguous title match | Run `tools/beampilot_setup.py` to list candidates; pin it with `BEAMPILOT_CAM_REGION` |
+| **Camera frames are solid green** | The capture returned no data — almost always the X11 backend on Wayland | `BEAMPILOT_CAPTURE_BACKEND=portal` — see [Wayland](#wayland) |
+| Camera frames are black | Capturing a blank region or an idle source | Check the region/monitor, or which source the portal is sharing |
+| It's capturing the wrong window | Ambiguous title match | Run `tools/beampilot_setup.py` to list candidates; pin it with `BEAMPILOT_CAM_REGION`, or use the portal backend and pick it from the dialog |
 | Model sees nothing / drives blind | Capturing the wrong monitor | Set `BEAMPILOT_CAM_WINDOW=beamng`, or fix `BEAMPILOT_CAM_MONITOR` |
+| "no BeamNG window found" | Several unrelated causes | `python -m openpilot.selfdrive.beamcamd.window_capture` names the actual one |
+| The portal keeps asking which window to share | The restore token isn't being saved | Check `~/.local/state/beampilot/` is writable |
+| Want to change the shared source | The choice is remembered | `rm ~/.local/state/beampilot/screencast_restore_token`, relaunch |
+| `modeld` not running, no other error | tinygrad picked a GPU it can't drive | See [GPU selection](#gpu-selection) |
+| `beamcamd` exits on an X11 protocol error | Capture rectangle outside the screen | Fixed — regions are clamped. If it recurs, report the region it logs |
 
 > [!TIP]
 > **If the driving or steering goes strange for no obvious reason, restart openpilot before

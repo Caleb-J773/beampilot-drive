@@ -43,6 +43,8 @@ CAN only flows **into** openpilot (fake sensors), never back into the game.
 |---|---|
 | `openpilot/selfdrive/beamngd/beamngd.py` | bridge: telemetry in, fake CAN/IMU/GPS out, control out |
 | `openpilot/selfdrive/beamcamd/beamcamd.py` | screen capture → VisionIPC camera frames |
+| `openpilot/selfdrive/beamcamd/window_capture.py` | X11 window detection; KWin/Wayland diagnosis (`python -m ...window_capture` prints a full report) |
+| `openpilot/selfdrive/beamcamd/portal_capture.py` | Wayland capture: xdg-desktop-portal ScreenCast + PipeWire |
 | `tools/beamng_mod/beampilot_bridge/lua/vehicle/protocols/beampilot.lua` | the BeamNG mod: telemetry out, control in |
 | `tools/beamng_mod/openpilot_cam/lua/ge/.../openpilot.lua` | rigid, FOV-matched camera (25.70° vertical). **Required** — `beampilot.lua` selects it by name at spawn |
 | `openpilot/tools/sim/lib/simulated_car.py` | fake Honda CAN packing (shared with MetaDrive bridge) |
@@ -128,6 +130,38 @@ These were each a real bug that cost significant debugging time. Don't regress t
   creates an implicit global instead of using the closure variable.
 - **`launch_beampilot.sh` needs its shebang.** Without it, fish's ENOEXEC fallback runs it under
   `dash`, `source` fails silently, and the whole config is quietly lost.
+- **An all-green picture means the capture produced NO data — it is not a colour bug.** An
+  untouched NV12 buffer is `Y=0, U=V=0`, which decodes to RGB(0,135,0); real black is `Y=16,
+  U=V=128`. So green is the signature of an empty buffer, and the usual cause is the X11 backend
+  on Wayland, where a root grab returns nothing. Don't debug the conversion; check the backend.
+  `_warn_if_blank()` now detects a uniform frame and says so.
+- **Wayland cannot be captured with X11 calls, and detecting the window proves nothing.** BeamNG
+  is normally an XWayland client, so `xdotool` finds it and the region looks right — but pixels
+  belong to the compositor, so the grab still returns nothing. Detection and capture are separate
+  problems. Wayland capture goes through `portal_capture.py`; `BEAMPILOT_CAPTURE_BACKEND=auto`
+  selects it on Wayland and leaves X11 sessions on the X11 grab.
+- **KWin's window geometry is NOT a valid capture region.** It is the compositor's logical
+  coordinate space and does not map onto the X root that mss grabs. `window_capture.py` queries
+  KWin only to *explain* a failure, never to pick a rectangle. Wiring it into tracking would
+  capture the wrong pixels while looking like it worked.
+- **A capture rectangle must be clamped to the X root or `beamcamd` dies.** X11 `GetImage` raises
+  BadMatch (error 8, opcode 73) if any part of the region is off-screen, and mss surfaces it as an
+  uncaught `XProtoError`. beamcamd exits → camerad's VisionIPC streams vanish → `modeld`, which
+  blocks in `available_streams()`, never starts → `process_not_running: modeld` and nothing else
+  obviously wrong. A monitor whose edge is flush with the virtual screen leaves zero slack, so
+  this is easy to hit.
+- **tinygrad's NV/AMD backends are not CUDA/ROCm** — raw ioctls, Ampere-or-newer only (`NV`), or
+  gfx942/gfx950/gfx11xx/gfx12xx (`AMD`). An older card doesn't run slowly, it dies at model load
+  with a bare `StopIteration` in `ops_nv.py:440`. On a mixed-GPU box tinygrad defaults to index 0,
+  which may be the unusable card. `config_beampilot.sh` detects the first usable one and sets
+  `DEV=":<index>+NV"` — index BEFORE the `+`. Detected, not hardcoded: PCI enumeration shifts when
+  cards move.
+- **openpilot's `Ratekeeper` never resyncs**, so one long frame makes it sleep zero until it has
+  caught up — a 285 ms hiccup emits ~6 frames ~13 ms apart and modeld sees the world lurch then
+  stall. `beamcamd` uses `FramePacer`, which drops a backlog it can no longer deliver on time.
+- **Don't run `find_window()` on a timer.** It shells out to pgrep/xdotool/xprop per candidate:
+  68 ms+ measured, against a 50 ms frame budget, so a 2 s retrack guaranteed a dropped frame. Use
+  `window_geometry()` on the known id (~0.7 ms) and only rediscover when the window disappears.
 - **`beamcamd` timestamps must be `time.monotonic_ns()`**, not a synthetic frame counter.
   `locationd._validate_timestamp` rejects fake ones on every frame, permanently.
   (openpilot's own `system/camerad/webcam/camerad.py` has this same bug, unfixed — it's just
@@ -140,6 +174,19 @@ These were each a real bug that cost significant debugging time. Don't regress t
   (this is a *resolution* switch, not a UI scale knob — use `SCALE` for that).
 - `SKIP_FW_QUERY=1` + `FINGERPRINT=HONDA_CIVIC_2022` — the car identity is set here, not
   fingerprinted from CAN. Changing it requires matching `beamngd`/`beamcamd` updates.
+- **This machine has two NVIDIA cards**: a GTX 1660 SUPER (Turing, 7.5) at index 0 and the RTX
+  3060 (Ampere, 8.6) at index 1. Only the 3060 can run the model, so `DEV=:1+NV` — auto-detected,
+  and printed at launch as `[beampilot] tinygrad NV -> GPU 1`. The AMD iGPU is gfx1036, which
+  tinygrad does not support, so `USE_AMD=1` is not an option here.
+- `BEAMPILOT_CAPTURE_BACKEND` = `auto` | `x11` | `portal`. The portal backend also works on X11
+  and measures smoother there (50.00 ms mean / 51.28 max vs 49.96 / 66.81 over 300 frames, since
+  the frame is already in memory rather than the loop blocking on the X server) and skips window
+  detection entirely — but it needs `gst-launch-1.0` + a desktop portal, and one dialog click, so
+  it is not the X11 default. The portal's source choice is remembered in
+  `~/.local/state/beampilot/screencast_restore_token`; delete it to get the picker back.
+- **Testing status:** the portal path is verified end-to-end on X11/GNOME here and confirmed
+  working on KDE Wayland by a user. The KWin *detection* path has only ever been exercised against
+  a simulated compositor (`test_window_capture.py`) — no Plasma on this machine.
 
 ## Control mode (optional)
 

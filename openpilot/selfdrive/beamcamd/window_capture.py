@@ -86,10 +86,10 @@ def capture_support() -> tuple[bool, str]:
     return False, ("no DISPLAY set -- capture needs an X server. Under Wayland, XWayland" +
                    " normally provides one; check that XWayland is running.")
   if session == "wayland":
-    return True, ("Wayland session detected. BeamNG is an X11 client so it runs under XWayland," +
-                  " which usually captures fine -- but this depends on your compositor, and" +
-                  " native Wayland capture (PipeWire portal) is not implemented. If frames come" +
-                  " out black, log into an X11/Xorg session.")
+    return True, ("Wayland session detected -- capture goes through xdg-desktop-portal and" +
+                  " PipeWire (BEAMPILOT_CAPTURE_BACKEND=auto selects it), which prompts once for" +
+                  " a window or monitor. Forcing the x11 backend here would produce solid green" +
+                  " frames, since an X11 grab cannot read a Wayland screen.")
   if session == "x11":
     return True, "X11 session -- fully supported."
   return True, f"unknown session type ({session!r}); attempting X11 capture."
@@ -404,12 +404,11 @@ def explain_not_found(match: str = "beamng") -> str:
     return (f"KWin reports a matching window ({w.get('caption', '')!r}, class"
             + f" {w.get('cls', '')!r}, {w.get('width')}x{w.get('height')}"
             + f" at +{w.get('x')}+{w.get('y')}) but xdotool cannot see it, so it is a NATIVE"
-            + " WAYLAND window rather than an XWayland one. X11 screen capture cannot read"
-            + " native Wayland surfaces, so neither window tracking nor frame capture can work"
-            + " as-is. Run BeamNG under XWayland (for Proton, leave Wine on its X11 driver"
-            + " rather than the Wayland one), or log into an X11/Xorg session. Capturing"
-            + " Wayland properly needs the xdg-desktop-portal ScreenCast/PipeWire API, which"
-            + " is not implemented here.")
+            + " WAYLAND window rather than an XWayland one, which X11 window tracking cannot"
+            + " follow. This is not a problem to work around: set"
+            + " BEAMPILOT_CAPTURE_BACKEND=portal (or leave it on auto) to capture through"
+            + " xdg-desktop-portal and PipeWire, which streams the window the compositor owns"
+            + " and needs no X11 tracking at all.")
 
   return (f"Neither xdotool nor KWin can see a window matching {match!r};"
           + " KWin answered, so the compositor genuinely has no such window. Is BeamNG running?")
