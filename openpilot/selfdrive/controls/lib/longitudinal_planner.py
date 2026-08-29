@@ -11,14 +11,25 @@ from openpilot.selfdrive.modeld.constants import ModelConstants
 from openpilot.selfdrive.controls.lib.longcontrol import LongCtrlState
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import LongitudinalMpc, LongitudinalPlanSource
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import T_IDXS as T_IDXS_MPC
-from openpilot.selfdrive.controls.lib.drive_helpers import CONTROL_N, get_accel_from_plan, should_stop
+from openpilot.selfdrive.controls.lib.drive_helpers import CONTROL_N, env_float, get_accel_from_plan, should_stop
 from openpilot.selfdrive.car.cruise import V_CRUISE_MAX, V_CRUISE_UNSET
 from openpilot.common.swaglog import cloudlog
 
-A_CRUISE_MAX_VALS = [1.6, 1.2, 0.8, 0.6]
+# beampilot: scale the whole cruise acceleration/jerk envelope. 1.0 == stock
+# openpilot. A_CRUISE_MAX_VALS is the speed-dependent comfort limit on how hard
+# cruise will accelerate (1.6 m/s^2 from a stop, tapering to 0.6 above 40 m/s);
+# raising it makes the car actually get up to the set speed instead of crawling.
+# ACCEL_MAX/ACCEL_MIN (from opendbc) are the hard clips applied on top, so they
+# scale too or they'd just re-clamp everything back down.
+_ACCEL_SCALE = env_float("BEAMPILOT_ACCEL_SCALE", 1.0)
+_DECEL_SCALE = env_float("BEAMPILOT_DECEL_SCALE", 1.0)
+
+A_CRUISE_MAX_VALS = [v * _ACCEL_SCALE for v in (1.6, 1.2, 0.8, 0.6)]
 A_CRUISE_MAX_BP = [0., 10.0, 25., 40.]
-J_CRUISE_VALS = [1.6, 1.2, 0.8, 0.6]
-A_CRUISE_MIN = -1.2
+J_CRUISE_VALS = [v * _ACCEL_SCALE for v in (1.6, 1.2, 0.8, 0.6)]
+A_CRUISE_MIN = -1.2 * _DECEL_SCALE
+ACCEL_MAX = ACCEL_MAX * _ACCEL_SCALE
+ACCEL_MIN = ACCEL_MIN * _DECEL_SCALE
 CONTROL_N_T_IDX = ModelConstants.T_IDXS[:CONTROL_N]
 ALLOW_THROTTLE_THRESHOLD = 0.4
 MIN_ALLOW_THROTTLE_SPEED = 2.5

@@ -1,17 +1,43 @@
+import os
+
 import numpy as np
 from openpilot.common.constants import ACCELERATION_DUE_TO_GRAVITY
 from openpilot.common.realtime import DT_CTRL, DT_MDL
+
+
+def env_float(name: str, default: float) -> float:
+  """beampilot: allow overriding a comfort/safety limit from the environment.
+
+  These limits are tuned for a real car carrying real passengers, following EU/
+  ISO comfort guidelines. In a simulator they're often the binding constraint on
+  whether openpilot can follow a road at all: MAX_LATERAL_ACCEL_NO_ROLL of
+  3.0 m/s^2 caps curvature at 3.0/v^2 -- a ~300m turn radius at 67mph -- so
+  anything tighter is clipped and the car runs wide.
+
+  Defaults are the stock upstream values, so an unset environment behaves as
+  unmodified openpilot. Set these in config_beampilot.sh. Raising them makes
+  openpilot drive more aggressively than comma ships it, which is the intent
+  here, but is also why they're opt-in rather than edited in place.
+  """
+  raw = os.environ.get(name)
+  if raw is None:
+    return default
+  try:
+    return float(raw)
+  except ValueError:
+    return default
+
 
 MIN_SPEED = 1.0
 CONTROL_N = 17
 CAR_ROTATION_RADIUS = 0.0
 # This is a turn radius smaller than most cars can achieve
-MAX_CURVATURE = 0.2
+MAX_CURVATURE = env_float("BEAMPILOT_MAX_CURVATURE", 0.2)
 MIN_STABLE_DELAY = 0.3
 
 # EU guidelines
-MAX_LATERAL_JERK = 5.0  # m/s^3
-MAX_LATERAL_ACCEL_NO_ROLL = 3.0  # m/s^2
+MAX_LATERAL_JERK = env_float("BEAMPILOT_MAX_LAT_JERK", 5.0)  # m/s^3
+MAX_LATERAL_ACCEL_NO_ROLL = env_float("BEAMPILOT_MAX_LAT_ACCEL", 3.0)  # m/s^2
 
 
 def should_stop(v_ego: float, a_target: float) -> bool:

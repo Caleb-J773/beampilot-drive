@@ -62,6 +62,31 @@ Cruise buttons are read from the **physical keyboard** via evdev (BeamNG has foc
 must be a device-level listener): `i` = SET/decel, `o` = RES/accel, `u` = cancel.
 Not `c`/`v`/`b` — those collide with BeamNG's own bindings (`c` cycles camera).
 
+**Lane changes:** signal with `,` (left) / `.` (right) — BeamNG's own default bindings — while
+engaged above 20 mph. Requires `BEAMPILOT_AUTO_LANE_CHANGE=1` (set in config): stock openpilot
+also demands a steering-wheel nudge (`desire_helper.py`'s `torque_applied`), which can never
+happen here since `beamngd` reports `user_torque = 0.0`, so a signalled change would arm into
+`preLaneChange` and stall there forever.
+
+## Driving limits
+
+Stock openpilot follows EU/ISO passenger-comfort limits, which in a sim are usually what stops
+it cornering or getting up to speed. All are env-tunable from `config_beampilot.sh`, and each
+**defaults to the stock upstream value if unset** — an unset environment is unmodified openpilot.
+
+| Env var | Stock | Controls |
+|---|---|---|
+| `BEAMPILOT_MAX_LAT_ACCEL` | 3.0 m/s² | turning. Max curvature is `accel / v²`, so stock allows only a ~300 m radius at 67 mph |
+| `BEAMPILOT_MAX_LAT_JERK` | 5.0 m/s³ | how fast curvature may change. **Raise this cautiously — it's the most likely source of weaving/oscillation** |
+| `BEAMPILOT_MAX_CURVATURE` | 0.2 1/m | geometric cap; only binds below ~11 mph |
+| `BEAMPILOT_ACCEL_SCALE` | 1.0 | multiplier on the whole accel envelope (`A_CRUISE_MAX_VALS` *and* `ACCEL_MAX` — scaling only the first leaves `ACCEL_MAX` re-clamping it back down) |
+| `BEAMPILOT_DECEL_SCALE` | 1.0 | same for braking |
+
+These are *permission* limits, not commands: raising them lets openpilot turn harder, it doesn't
+make it want to. If it still runs wide, suspect the geometry mismatch instead — openpilot
+computes wheel angle from the **Civic's** steerRatio 15.38 / wheelbase 2.700 m, while the BeamNG
+vehicle has its own (only its 510° lock has been measured).
+
 Debug while running, in a second terminal:
 ```bash
 uv run python tools/beampilot_monitor.py    # live, Ctrl+C to stop
@@ -84,6 +109,13 @@ These were each a real bug that cost significant debugging time. Don't regress t
 - **`pcmCruise=True`** for this fingerprint: openpilot waits for the *car* to report ACC on
   before engaging. So `ACC_STATUS` must be driven by the cruise button directly
   (`self.acc_engaged`), never from `selfdriveState.active` — that's a deadlock.
+- **`AlphaLongitudinalEnabled` must be set before the stack starts**, or honda's `interface.py`
+  leaves `openpilotLongitudinalControl=False` / `pcmCruise=True` — openpilot steers but expects
+  the *car's* ACC to manage speed, and BeamNG has none, so it never accelerates or holds speed.
+- **Never report BeamNG's throttle/brake as the driver's pedal input while engaged.**
+  `electrics.values.throttle` is our own `input.event` command echoed back; feeding it to
+  `PEDAL_GAS` makes `CS.gasPressed` true, which trips `selfdrived.py`'s rising-edge
+  `pedalPressed` check and disengages the instant openpilot tries to accelerate.
 - **`commIssue` is NOT cosmetic.** It's registered as both `NO_ENTRY` and `SOFT_DISABLE`
   (`selfdrived/events.py`) — it blocks engagement *and* disengages mid-drive. Wrong publish
   rates cause it. Treat those log lines as real.

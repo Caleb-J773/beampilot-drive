@@ -15,6 +15,14 @@ source "$DIR/config_beampilot.sh"
 # config_beampilot.sh already exported.
 python3 -c "from openpilot.selfdrive.test.helpers import set_params_enabled; set_params_enabled()"
 
+# Hand LONGITUDINAL (speed) control to openpilot. Without this, honda's
+# interface.py sets openpilotLongitudinalControl=False / pcmCruise=True, meaning
+# openpilot steers but expects the CAR's own ACC to manage speed -- and BeamNG
+# has no ACC, so nothing accelerates or holds speed at all. The MetaDrive/CARLA
+# bridges set this same param for the same reason (tools/sim/bridge/common.py).
+# Must be set before card.py reads it during fingerprinting, hence here.
+python3 -c "from openpilot.common.params import Params; Params().put_bool('AlphaLongitudinalEnabled', True, block=True)"
+
 echo ""
 echo ">>> Switch to the BeamNG.drive window now -- starting in 5 seconds <<<"
 for i in 5 4 3 2 1; do

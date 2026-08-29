@@ -13,6 +13,38 @@ export SIMULATION="1"
 # and CAN formats differ from car to car
 export FINGERPRINT="HONDA_CIVIC_2022"
 export SKIP_FW_QUERY="1"
+
+# ---------------------------------------------------------------------------
+# Driving limits. Stock openpilot follows EU/ISO passenger-comfort guidelines,
+# which in a sim are usually the reason it won't take a corner or get up to
+# speed. Every value below defaults to the stock number if unset, so commenting
+# a line out restores unmodified openpilot behavior.
+#
+# LATERAL (turning). The binding one is lateral accel: max curvature is
+# MAX_LAT_ACCEL / v^2, so stock 3.0 allows only a ~300m radius at 67mph.
+#   3.0 = stock/comfort   5.0 = spirited   8.0+ = approaching real tire grip
+export BEAMPILOT_MAX_LAT_ACCEL="5.0"    # m/s^2
+export BEAMPILOT_MAX_LAT_JERK="8.0"     # m/s^3, how fast it may change curvature
+# export BEAMPILOT_MAX_CURVATURE="0.2"  # 1/m, geometric cap; only binds below ~11mph
+#
+# LONGITUDINAL (accel/braking), as a multiplier on the stock envelope.
+export BEAMPILOT_ACCEL_SCALE="2.0"      # 1.0 = stock (1.6 m/s^2 from a stop)
+export BEAMPILOT_DECEL_SCALE="1.5"      # 1.0 = stock (-1.2 m/s^2 cruise braking)
+# ---------------------------------------------------------------------------
+
+# Commit a lane change from the blinker alone. Stock openpilot also requires a
+# nudge on the steering wheel, which can't happen here -- there's no physical
+# wheel, and beamngd reports user_torque=0 always, so steeringPressed is never
+# true and a signalled lane change would arm and then stall forever.
+# Signal with , (left) and . (right) while engaged above 20mph.
+export BEAMPILOT_AUTO_LANE_CHANGE="1"
+
+# Silence the audible alert chimes. manager.py:114 treats every comma-separated
+# name in BLOCK as a process not to start; soundd is the one that plays alert
+# sounds. Visual alerts still appear in the UI -- this only mutes audio, it does
+# NOT suppress the underlying events or stop them from disengaging.
+# Remove soundd from this list to get the chimes back.
+export BLOCK="${BLOCK},soundd"
 export HSA_ENABLE_DXG_DETECTION=1
 
 # to use gpu, pick one, (AMD) or (NV)idia

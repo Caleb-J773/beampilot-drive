@@ -292,8 +292,22 @@ class BeamNGBridge:
     # negation (-toInputSpace(...)), so its sign convention needs its own
     # empirical check -- do not assume it matches steering_input's.
     self.state.steering_angle = telemetry.steering_wheel_deg
-    self.state.user_gas = telemetry.throttle
-    self.state.user_brake = telemetry.brake
+    # electrics.values.throttle/brake report the vehicle's CURRENT pedal state,
+    # which while engaged is our OWN input.event command echoed back -- not the
+    # driver. Reporting it as user_gas/user_brake creates a feedback loop that
+    # disengages openpilot the instant it tries to accelerate: throttle command
+    # -> BeamNG applies it -> telemetry echoes it -> PEDAL_GAS -> CS.gasPressed
+    # -> selfdrived's rising-edge pedalPressed check (selfdrived.py:250) fires
+    # EventName.pedalPressed -> disengage. Same for brake.
+    # While we're driving there is no separate user pedal input to report
+    # anyway: pollControl() calls input.event(FILTER_DIRECT) every tick, which
+    # overwrites whatever the player's own keys/pedals set.
+    if self.acc_engaged:
+      self.state.user_gas = 0.0
+      self.state.user_brake = 0.0
+    else:
+      self.state.user_gas = telemetry.throttle
+      self.state.user_brake = telemetry.brake
     self.state.user_torque = 0.0
 
     if not self.acc_engaged:
