@@ -18,6 +18,9 @@ local TELEMETRY_PORT = 49152 -- this protocol's outbound port (mod -> openpilot)
 local CONTROL_PORT = 49153 -- inbound control port (openpilot -> mod)
 local CONTROL_ADDRESS = "127.0.0.1"
 local CONTROL_TIMEOUT = 0.5 -- seconds; if openpilot goes quiet (crash/pause) this long, release control
+-- beamngd re-broadcasts its config every 2s, so anything older than a few of
+-- those means nothing is listening any more.
+local CONFIG_STALE_SECONDS = 8
 
 local controlSocket
 local lastControlAt = nil -- os.clock() timestamp of the last applied control packet, nil = never/released
@@ -354,8 +357,12 @@ local vehicleName = ""
 local vehicleStatic = nil            -- nil until measured; retried until it works
 local vehicleFrontWheels = nil       -- {leftWheelId, rightWheelId}
 local steerSumXY, steerSumXX, steerSamples = 0, 0, 0
-local calPhase, calElapsed, calWasControlling = "idle", 0, false
+local calPhase, calElapsed = "idle", 0
 local steerLimitWarned = false
+-- os.clock() of the last config broadcast from beamngd. beamngd re-sends every
+-- 2s whether or not openpilot is engaged, so this is a live "is anything
+-- listening" signal -- unlike lastControlAt, which only moves while ENGAGED.
+local lastConfigAt = nil
 
 local function vehicleResetMeasurements()
   vehicleAccum = 0
@@ -560,14 +567,33 @@ local function vehicleCalibrate(dtSim)
     return
   end
 
+  -- Nobody is listening, so there is nowhere for the answer to go: the cache
+  -- that makes this a once-per-vehicle cost lives in beamngd, not here. Sweeping
+  -- anyway would just wiggle the wheel on every spawn and measure into the void.
+  if not lastConfigAt or (os.clock() - lastConfigAt) > CONFIG_STALE_SECONDS then
+    if calPhase == "sweeping" then
+      input.event("steering", 0, FILTER_DIRECT)
+      calPhase, calElapsed = "idle", 0
+    end
+    return
+  end
+
   local speed = math.abs(electrics.values.wheelspeed or 0)
   local moving = speed > vehicleCfg.calibrateMaxSpeed
   if moving or isControlling then
     if calPhase == "sweeping" then
-      input.event("steering", 0, FILTER_DIRECT)
+      -- Re-centre only if we still own the wheel. pollControl() runs BEFORE
+      -- this every tick, so when openpilot has just engaged it has already
+      -- written its steering for this tick -- and writing 0 over the top would
+      -- blank its first command. Aborting because the car MOVED is the case
+      -- where the rack is genuinely still ours and must be put back.
+      if not isControlling then
+        input.event("steering", 0, FILTER_DIRECT)
+      end
       calPhase = "idle"          -- try again next time the car is stopped
       calElapsed = 0
-      log("I", "", "beampilot: steering calibration aborted (the car moved, or openpilot took over)")
+      log("I", "", "beampilot: steering calibration aborted ("
+          .. (isControlling and "openpilot took over" or "the car moved") .. ")")
     end
     return
   end
@@ -1018,7 +1044,10 @@ local function pollControl()
     -- vehicle reload picks the settings back up on its own.
     if decoded and type(msg.bsm) == "table" then applyBsmConfig(msg.bsm) end
     if decoded and type(msg.radar) == "table" then applyRadarConfig(msg.radar) end
-    if decoded and type(msg.vehicle) == "table" then applyVehicleConfig(msg.vehicle) end
+    if decoded and type(msg.vehicle) == "table" then
+      applyVehicleConfig(msg.vehicle)
+      lastConfigAt = os.clock()
+    end
     if decoded and type(msg.cancelSignal) == "string" then cancelSignal(msg.cancelSignal) end
     if decoded and msg.engaged then
       if msg.steering ~= nil then input.event("steering", msg.steering, FILTER_DIRECT) end

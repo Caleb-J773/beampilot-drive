@@ -596,7 +596,13 @@ rack's own rate limit lagging behind the command does not affect the answer — 
 relationship between two observed quantities, not between a command and an observation. Against a
 simulated rack with a known 17.5 ratio and realistic lag, it recovers 17.50.
 
-It only ever runs stopped, with openpilot not driving, and aborts the instant either stops being
+**openpilot has to be running, but not engaged.** The sweep itself is pure BeamNG-side code, but
+it refuses to run unless `beamngd` is alive and broadcasting — because the *cache* lives on the
+openpilot side, so with nothing listening the measurement would be thrown away and the wheel would
+wiggle again on the next spawn for nothing. So: launch beampilot, sit still for a moment, then
+drive. You do not need to engage.
+
+It only ever runs stopped, with openpilot not *driving*, and aborts the instant either stops being
 true. `BEAMPILOT_STEER_CALIBRATE=0` turns it off and goes back to measuring from ordinary driving.
 
 > [!TIP]
