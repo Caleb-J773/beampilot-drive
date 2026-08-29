@@ -7,6 +7,7 @@ import openpilot.cereal.messaging as messaging
 # opendbc: they are the SCALED pair, and long_mpc.py has to agree with them or
 # the MPC's own bound silently wins.
 from openpilot.common.beampilot_limits import A_TOTAL_MAX_SCALE, ACCEL_MAX, ACCEL_MIN
+from openpilot.selfdrive.controls.lib.beampilot_curve import CurveSpeedLimiter
 from openpilot.common.constants import CV
 from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.common.realtime import DT_MDL
@@ -75,6 +76,11 @@ class LongitudinalPlanner:
   def __init__(self, CP, init_v=0.0, init_a=0.0, dt=DT_MDL):
     self.CP = CP
     self.mpc = LongitudinalMpc(dt=dt)
+    # beampilot: brake for a corner before reaching it. Stock openpilot only
+    # caps acceleration once already cornering; nothing slows down for a bend
+    # ahead, which the narrow camera makes worse -- the model sees the corner
+    # late, so arriving too fast shows up as running wide at the entry.
+    self.curve_limiter = CurveSpeedLimiter(dt)
     self.fcw = False
     self.dt = dt
     self.allow_throttle = True
@@ -145,8 +151,9 @@ class LongitudinalPlanner:
     output_a_target_mpc = get_accel_from_plan(self.v_desired_trajectory, self.a_desired_trajectory, CONTROL_N_T_IDX,
                                               action_t=action_t)
     output_should_stop_mpc = should_stop(v_ego, output_a_target_mpc)
-    output_a_target_e2e = sm['modelV2'].action.desiredAcceleration
-    output_should_stop_e2e = sm['modelV2'].action.shouldStop
+    model_v2 = sm['modelV2']
+    output_a_target_e2e = model_v2.action.desiredAcceleration
+    output_should_stop_e2e = model_v2.action.shouldStop
 
     self.a_cruise = get_cruise_accel(sm['selfdriveState'].experimentalMode, v_cruise, v_ego,
                                      self.a_cruise, steer_angle_without_offset, self.CP, self.dt,
@@ -157,6 +164,16 @@ class LongitudinalPlanner:
                   (self.a_cruise, LongitudinalPlanSource.cruise, cruise_should_stop)]
     if sm['selfdriveState'].experimentalMode:
       candidates.append((output_a_target_e2e, LongitudinalPlanSource.e2e, output_should_stop_e2e))
+
+    # beampilot: one more candidate, from the curvature the model has already
+    # predicted along its own path. Offered rather than imposed -- min() below
+    # means it only wins when it is the most restrictive, so a lead car or the
+    # cruise setpoint still take precedence when they are.
+    curve_accel = self.curve_limiter.update(v_ego, model_v2.position.x, model_v2.velocity.x,
+                                            model_v2.orientationRate.z, ModelConstants.T_IDXS,
+                                            accel_min=ACCEL_MIN)
+    if curve_accel is not None:
+      candidates.append((curve_accel, LongitudinalPlanSource.cruise, False))
 
     output_a_target, self.mpc.source, _ = min(candidates, key=lambda c: c[0])
     self.output_should_stop = any(should_stop for _, _, should_stop in candidates)

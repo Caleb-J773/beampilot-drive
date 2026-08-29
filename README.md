@@ -181,7 +181,7 @@ uv run python tools/beampilot_tui.py
 <details>
 <summary>What the TUI does</summary>
 
-Groups all 51 settings under Hardware / Car / Driving limits / Controls / Blind spot / Radar /
+Groups all 53 settings under Hardware / Car / Driving limits / Controls / Blind spot / Radar /
 Camera / Alerts / Bridge, with an explanation of each and what the stock openpilot value is.
 Detects your GPUs via `nvidia-smi` and `lspci` and only offers backends this machine has.
 Settings that differ from their default are highlighted; ones with consequences (like
@@ -291,6 +291,8 @@ the reason it won't take a corner.
 | `BEAMPILOT_ACCEL_SCALE` | `1.0` | Multiplier on the acceleration envelope. |
 | `BEAMPILOT_DECEL_SCALE` | `1.0` | Same, braking. |
 | `BEAMPILOT_ACTUATION_MARGIN` | `2.0` | Headroom the excessive-actuation check keeps above the limits above. |
+| `BEAMPILOT_CURVE_SLOWDOWN` | `1` | Brake for a corner *before* reaching it. See [below](#slowing-down-for-corners). |
+| `BEAMPILOT_CURVE_LAT_ACCEL` | `0.7 ×` lateral limit | The cornering force to aim for, which sets the speed it slows to. |
 | `BEAMPILOT_PERSONALITY` | `1` | Follow distance: `0` aggressive (1.25 s), `1` standard (1.45 s), `2` relaxed (1.75 s). |
 
 > [!IMPORTANT]
@@ -307,6 +309,39 @@ the reason it won't take a corner.
 > All three scale together now (`openpilot/common/beampilot_limits.py`), and the safety net keeps
 > `ACTUATION_MARGIN`× headroom above whatever you allow. Run
 > `uv run python -m openpilot.common.beampilot_limits` to print the active envelope.
+
+#### Slowing down for corners
+
+Stock openpilot **holds the set speed through a bend**. It caps acceleration once already
+cornering (`a_x = sqrt(a_total² − a_y²)`), but nothing ever brakes for a corner ahead. On a real
+car that's fine — the wide camera sees round it and a driver is watching. Here the model's view
+is the 25.70° narrow one, so a corner arrives late and thin, and the raised lateral limits above
+mean the car will carry a speed into a bend it then can't hold. That shows up as running wide at
+the entry.
+
+So beampilot reads the curvature the model has already predicted along its own path, works out
+the fastest speed that holds `BEAMPILOT_CURVE_LAT_ACCEL`, and asks for the deceleration that gets
+there by the time the corner arrives. It's *offered* to the planner as one more candidate — a
+lead car or the cruise setpoint still win when they're more restrictive.
+
+Approaching a 120 m corner 200 m ahead at 67 mph:
+
+```
+  t= 0.0s   198 m to go   67 mph   (no request yet)
+  t= 2.5s   125 m to go   62 mph   -1.96 m/s²
+  t= 5.0s    62 m to go   51 mph   -2.07 m/s²
+  t= 7.5s    12 m to go   40 mph   -1.33 m/s²
+  t=10.0s     at corner   36 mph   -0.27 m/s²   <- exactly what it allows
+```
+
+Curvature comes from the model, not the steering angle: the steering angle says what the car is
+doing *now*, which is the information that arrives too late. The monitor has a **corner speed**
+line showing the tightest curve ahead and what it allows.
+
+Tuning: `_CURVE_MIN_SPEED_MS` (`5.0`, never crawl), `_CURVE_ENABLE_SPEED_MS` (`6.0`),
+`_CURVE_LOOKAHEAD_S` (`6.0`), `_CURVE_JERK` (`4.0`), `_CURVE_MIN_PLAN_S` (`1.5`, the shortest
+travel time it will plan a speed change over — without it, a corner the car is already *in*
+divides by ~zero distance and demands maximum braking).
 
 <details>
 <summary>What raising these actually does (and doesn't)</summary>

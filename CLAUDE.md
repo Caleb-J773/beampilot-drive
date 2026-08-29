@@ -65,6 +65,7 @@ CAN only flows **into** openpilot (fake sensors), never back into the game.
 | `openpilot/selfdrive/beamcamd/portal_capture.py` | Wayland capture: xdg-desktop-portal ScreenCast + PipeWire |
 | `tools/beamng_mod/beampilot_bridge/lua/vehicle/protocols/beampilot.lua` | the BeamNG mod: telemetry out, control in |
 | `tools/beamng_mod/openpilot_cam/lua/ge/.../openpilot.lua` | rigid, FOV-matched camera (25.70° vertical). **Required** — `beampilot.lua` selects it by name at spawn |
+| `openpilot/selfdrive/controls/lib/beampilot_curve.py` | brake for a corner before reaching it, from the model's own predicted curvature |
 | `openpilot/common/beampilot_limits.py` | how hard the car may be driven: accel/lateral limits, the combined envelope, and the excessive-actuation trip points, all scaling together |
 | `openpilot/common/beampilot_bsm.py` | BSM wire format + the `beamngd`→`card` socket, and the tuning pushed down to the mod |
 | `openpilot/common/beampilot_radar.py` | radar wire format + the `mod`→`card` socket (one hop; no relay) |
@@ -190,6 +191,14 @@ These were each a real bug that cost significant debugging time. Don't regress t
   struct turns "old mod, no BSM" into "old mod, no telemetry at all".
 - **A stale BSM feed must fail to *clear*, not to *blocked*.** A latched warning blocks every
   lane change for the rest of the drive with nothing on screen to explain it. 0.5s timeout.
+- **Stock openpilot never slows down FOR a corner.** It caps acceleration once already cornering
+  (`a_x = sqrt(a_total^2 - a_y^2)`) but the cruise path just holds the setpoint. Curve braking is
+  beampilot's (`beampilot_curve.py`), offered to `longitudinal_planner`'s `candidates` list so
+  `min()` keeps a lead car winning when it should. Two things that bite: take curvature from
+  `modelV2.orientationRate.z / velocity.x`, NOT the steering angle (the angle says what the car
+  is doing now, which is the bit that arrives too late), and floor the planning distance at
+  ~1.5s of travel or curvature at the first path point divides by ~zero and demands maximum
+  braking on every corner the car is already in.
 - **Raising a driving limit means raising THREE things.** `long_mpc.py` bounded its solution with
   opendbc's unscaled `ACCEL_MAX` and the planner takes `min(mpc, cruise)`, so the scale was
   mostly ignored; `_A_TOTAL_MAX_V` (the combined lat+long envelope) was unscaled, so raising the

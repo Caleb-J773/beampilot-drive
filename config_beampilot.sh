@@ -42,6 +42,33 @@ export BEAMPILOT_MAX_LAT_JERK="8.0"    # m/s^3, how fast it may change curvature
 # How much headroom the excessive-actuation net keeps above what is allowed.
 # Stock is 2x. Lower it to tighten the net; it can never drop below stock.
 # export BEAMPILOT_ACTUATION_MARGIN="2.0"
+
+# --- Slowing down for corners ----------------------------------------------
+# Stock openpilot holds the set speed through a bend. It caps ACCELERATION once
+# already cornering, but nothing ever brakes for a corner ahead. That is fine on
+# a real car with a wide camera and a driver watching; here the model's view is
+# a 25.70 degree narrow one, so a corner arrives late and thin, and the raised
+# lateral limits above mean the car will carry a speed into a bend it then
+# cannot hold. The result is running wide at the entry.
+#
+# This reads the curvature the model has already predicted along its own path,
+# works out the fastest speed that keeps lateral acceleration at the target
+# below, and asks for the deceleration that gets there by the time the corner
+# arrives. It is OFFERED to the planner, not imposed: a lead car or the cruise
+# setpoint still win when they are more restrictive.
+export BEAMPILOT_CURVE_SLOWDOWN="1"
+
+# The lateral acceleration to aim for in a corner. Defaults to 0.7x the hard
+# lateral limit -- arriving at exactly the limit leaves the steering saturated
+# for the whole bend with nothing in reserve for a mid-corner correction.
+# Raise it to corner faster, lower it to be gentler.
+# export BEAMPILOT_CURVE_LAT_ACCEL="2.1"
+
+# export BEAMPILOT_CURVE_MIN_SPEED_MS="5.0"     # never slow below this for curvature
+# export BEAMPILOT_CURVE_ENABLE_SPEED_MS="6.0"  # below this, do not bother
+# export BEAMPILOT_CURVE_LOOKAHEAD_S="6.0"      # how far ahead to look
+# export BEAMPILOT_CURVE_JERK="4.0"             # how fast the request may change
+# export BEAMPILOT_CURVE_MIN_PLAN_S="1.5"       # shortest travel time to plan a change over
 #
 # LONGITUDINAL (accel/braking), as a multiplier on the stock envelope.
 export BEAMPILOT_ACCEL_SCALE="2.0"    # 1.0 = stock (1.6 m/s^2 from a stop)
@@ -369,7 +396,7 @@ unset -f _bp_amd_gpu_index 2>/dev/null || true
 # 3X's screen), BIG=0 at literally 536x240 (comma 4's tiny embedded screen).
 # On a desktop monitor, BIG=0 will look absurdly small. Use SCALE below to
 # actually fine-tune the on-screen size instead.
-export BIG="0"
+export BIG="1"
 
 # On-screen window size: a multiplier on the base resolution BIG selects
 # (2160x1080 for BIG=1, 536x240 for BIG=0).
@@ -403,7 +430,7 @@ export BEAMPILOT_CAM_MONITOR="1"
 
 # --- added by tools/beampilot_tui.py ---
 export BEAMPILOT_GPU_INDEX="0"
-export SCALE="0.7"
+# export SCALE=""
 export BEAMPILOT_MAX_CURVATURE="0.2"
 export BEAMPILOT_LANE_CHANGE_ABORT_S="2.0"
 export BEAMPILOT_BSM_WIDTH_M="3.6"
@@ -419,3 +446,6 @@ export BEAMPILOT_TELEMETRY_PORT="49152"
 export BEAMPILOT_CONTROL_PORT="49153"
 export BEAMPILOT_BEAMNG_ADDRESS="127.0.0.1"
 export BEAMPILOT_LAUNCH_DELAY="0"
+
+# --- added by tools/beampilot_tui.py ---
+export BEAMPILOT_ACTUATION_MARGIN="2.0"

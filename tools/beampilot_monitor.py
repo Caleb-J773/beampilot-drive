@@ -21,6 +21,7 @@ import time
 import openpilot.cereal.messaging as messaging
 from openpilot.cereal.services import SERVICE_LIST
 from openpilot.common.beampilot_env import env_float
+from openpilot.selfdrive.controls.lib import beampilot_curve as curve
 from openpilot.selfdrive.controls.lib.drive_helpers import MAX_CURVATURE, MAX_LATERAL_ACCEL_NO_ROLL, MIN_SPEED
 
 # Everything our bridge produces, plus the downstream state it drives.
@@ -182,6 +183,28 @@ def main():
         out.append(f"  frameId {md.frameId}   frameDropPerc {md.frameDropPerc:.1f}%")
       else:
         out.append(f"  {RED}no model output{RST}")
+
+      # What the upcoming curvature allows, computed the same way the planner's
+      # curve limiter does -- so "why did it slow down there" has an answer.
+      out.append(f"\n{DIM}--- corner speed (from the model's predicted path) ---{RST}")
+      if len(md.velocity.x) > 1 and len(md.orientationRate.z) > 1:
+        curvatures = curve.path_curvatures(md.velocity.x, md.orientationRate.z)
+        speeds = [curve.safe_speed(k) for k in curvatures]
+        tightest = min(speeds) if speeds else float('inf')
+        idx = speeds.index(tightest) if speeds and tightest != float('inf') else 0
+        if tightest == float('inf'):
+          out.append("  road ahead is straight -- no curvature limit")
+        else:
+          ahead = md.position.x[idx] if idx < len(md.position.x) else 0.0
+          radius = 1 / max(abs(curvatures[idx]), 1e-9)
+          mark = f"  {YEL}<- slowing for this{RST}" if tightest < cs.vEgo else ""
+          out.append(f"  tightest in {ahead:5.1f} m: {radius:6.0f} m radius"
+                     + f" -> allows {tightest:5.2f} m/s ({tightest * MS_PER_S:5.1f} mph){mark}")
+          out.append(f"  now {cs.vEgo:5.2f} m/s ({cs.vEgo * MS_PER_S:5.1f} mph)"
+                     + f"   target lateral accel {curve.CURVE_LATERAL_ACCEL:.2f} m/s^2"
+                     + ("" if curve.CURVE_SLOWDOWN else f"   {YEL}[curve slowdown OFF]{RST}"))
+      else:
+        out.append("  no model path yet")
 
       # Is the lateral-accel limit actually BINDING, or is the model asking for
       # less than the ceiling anyway? clip_curvature() caps curvature at

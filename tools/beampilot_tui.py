@@ -151,6 +151,17 @@ def build_sections() -> list[Section]:
       Setting("BEAMPILOT_STEER_SWEEP_SECONDS", "Steering response (s)",
               "Lock-to-lock sweep time. Lower is snappier but twitchier.",
               "0.15", numeric=True, step=0.05),
+      Setting("BEAMPILOT_CURVE_SLOWDOWN", "Slow down for corners",
+              "Stock openpilot holds the set speed through a bend and only caps acceleration once"
+              + " already in it. With a narrow camera the model sees a corner late, so the car carries"
+              + " too much speed in and runs wide. This brakes for it beforehand, using the curvature"
+              + " the model has already predicted.",
+              "1", choices=["1", "0"]),
+      Setting("BEAMPILOT_CURVE_LAT_ACCEL", "Cornering accel (m/s2)",
+              "What lateral acceleration to aim for in a corner, which sets the speed it slows to."
+              + " Defaults to 0.7x the hard lateral limit so there is something in reserve mid-corner."
+              + " Higher corners faster.",
+              "2.1", numeric=True, step=0.1),
       Setting("BEAMPILOT_ACTUATION_MARGIN", "Actuation headroom",
               "How much room the excessive-actuation check keeps above what the limits above allow."
               + " It soft-disables on MEASURED actuation, so left at stock it becomes a ceiling on the"
