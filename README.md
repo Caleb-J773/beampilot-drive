@@ -214,6 +214,7 @@ tell rather than guess. If it's not binding and the car still runs wide, the cau
 | Setting | Default | |
 |---|---|---|
 | `BEAMPILOT_STEER_LOCK_DEG` | `510` | Your BeamNG car's steering lock. **Per-vehicle.** |
+| `BEAMPILOT_CALIBRATION` | `instant` | `instant` starts already calibrated at a level pose. `live` converges from real driving first, and won't engage until it has. |
 | `BEAMPILOT_STEER_SWEEP_SECONDS` | `0.15` | Lock-to-lock sweep time. Lower is snappier and twitchier. |
 | `FINGERPRINT` | `HONDA_CIVIC_2022` | The car openpilot thinks it's driving. |
 
@@ -263,6 +264,17 @@ Tested and working to some degree:
 > drives, but the model has less of the visual context it was trained on. If a car behaves badly,
 > that framing is the first thing to suspect — nudge `offUp`/`offFwd` in
 > `tools/beamng_mod/openpilot_cam/lua/ge/extensions/core/cameraModes/openpilot.lua`.
+
+The camera also sits noticeably **off-centre** on some cars. The mod places it relative to
+`veh:getPosition()`, which returns the vehicle's jbeam reference node — and that node isn't
+reliably on the centreline, so where the camera lands varies per vehicle. A real comma three is
+mounted near the rear-view mirror, and the model was trained from roughly there.
+
+It drives surprisingly well anyway. Lane positioning is learned from the whole scene rather than
+from the camera sitting at one exact spot, so a lateral offset mostly shifts where the car sits in
+the lane rather than breaking it outright. Worth knowing before you spend an evening chasing it:
+it's a real imperfection, but usually not the one causing your problem. `offRight` in the camera
+mod corrects it if a particular car tracks consistently to one side.
 
 Each vehicle also has its own steering lock, so set `BEAMPILOT_STEER_LOCK_DEG` when you switch
 cars (hold full lock and read `steering_wheel_deg` in the monitor).
@@ -661,13 +673,21 @@ never runs there, since that driver is disabled.
 | Bursts of `observation too old` | `modeld` behind, GPU contention | Lower BeamNG's graphics settings |
 | `Address already in use` on 49152 | A previous `beamngd` still running | `pkill -f beamngd.py` |
 | Nothing publishing at all | Stack not running | `tools/beampilot_diag.py` |
+| Steering suddenly odd for no clear reason | Stale state somewhere in the stack | **Restart openpilot** (Ctrl+C, relaunch). BeamNG can keep running. |
 | Camera frames are black | Wayland compositor blocking capture | Use an X11 session — see [Wayland](#wayland) |
 | It's capturing the wrong window | Ambiguous title match | Run `tools/beampilot_setup.py` to list candidates; pin it with `BEAMPILOT_CAM_REGION` |
 | Model sees nothing / drives blind | Capturing the wrong monitor | Set `BEAMPILOT_CAM_WINDOW=beamng`, or fix `BEAMPILOT_CAM_MONITOR` |
 
 > [!TIP]
-> Almost every question here is answered by `tools/beampilot_monitor.py`. Rates tell you what's
-> alive; the `carState` block tells you what openpilot believes; the BINDING line tells you
+> **If the driving or steering goes strange for no obvious reason, restart openpilot before
+> investigating.** Leave BeamNG running — it's the openpilot side that accumulates state
+> (calibration, the learned torque parameters, the localisation filter), and a fresh start clears
+> it. This genuinely fixes a surprising share of "it was fine yesterday" problems, and it's much
+> quicker than debugging.
+
+> [!TIP]
+> Almost every other question here is answered by `tools/beampilot_monitor.py`. Rates tell you
+> what's alive; the `carState` block tells you what openpilot believes; the BINDING line tells you
 > whether a limit is the constraint. Guessing is slower.
 
 ## Known problems

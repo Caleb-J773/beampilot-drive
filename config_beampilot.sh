@@ -32,6 +32,19 @@ export BEAMPILOT_ACCEL_SCALE="2.0"    # 1.0 = stock (1.6 m/s^2 from a stop)
 export BEAMPILOT_DECEL_SCALE="1.5"    # 1.0 = stock (-1.2 m/s^2 cruise braking)
 # ---------------------------------------------------------------------------
 
+# When camera calibration happens.
+#   instant -- start already "calibrated" at a level zero pose. Usable
+#              immediately; the right choice for the ETK series, where the
+#              camera really is roughly where the seed claims.
+#   live    -- converge from real driving instead. openpilot will NOT engage
+#              until it has, which needs minutes of sustained straight driving
+#              above 15mph (MIN_SPEED_FILTER / INPUTS_NEEDED in calibrationd).
+#              Slower to get going, but more honest on a car whose camera pose
+#              genuinely isn't level -- there a zero seed is a wrong answer
+#              rather than a head start, and shows up as steering bias.
+# calibrationd keeps refining either way; this only sets the starting point.
+export BEAMPILOT_CALIBRATION="instant"
+
 # Camera capture. Priority: CAM_REGION > CAM_WINDOW > CAM_MONITOR.
 # CAM_WINDOW tracks the BeamNG window by name/class and follows it as it moves
 # or resizes, so the game can be windowed and you keep a monitor free for the

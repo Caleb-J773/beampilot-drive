@@ -125,6 +125,10 @@ def build_sections() -> list[Section]:
       Setting("BEAMPILOT_STEER_LOCK_DEG", "Steering lock (deg)",
               "Your BeamNG vehicle's full lock. Measure it in the monitor. Too low oversteers, too high runs wide.",
               "510.0", numeric=True, step=10.0),
+      Setting("BEAMPILOT_CALIBRATION", "Calibration",
+              "instant = start already calibrated at a level pose, usable right away. "
+              + "live = converge from real driving first; won't engage until it has.",
+              "instant", choices=["instant", "live"]),
     ]),
     Section("Driving limits", "Stock openpilot follows EU/ISO comfort limits. These are often why it won't corner.", [
       Setting("BEAMPILOT_MAX_LAT_ACCEL", "Lateral accel (m/s2)",

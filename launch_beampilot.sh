@@ -15,6 +15,21 @@ source "$DIR/config_beampilot.sh"
 # config_beampilot.sh already exported.
 python3 -c "from openpilot.selfdrive.test.helpers import set_params_enabled; set_params_enabled()"
 
+# BEAMPILOT_CALIBRATION controls what the above did to CalibrationParams.
+#   instant (default) -- keep the seed: calibrationd starts "calibrated" with a
+#                        level zero pose, usable from the first second.
+#   live              -- clear it: calibrationd converges from real driving, and
+#                        openpilot will NOT engage until it has (minutes of
+#                        sustained straight driving above 15mph -- see
+#                        MIN_SPEED_FILTER / INPUTS_NEEDED in calibrationd.py).
+# Note calibrationd keeps refining either way; the seed only decides the
+# starting point. "live" is more honest on a car whose camera pose genuinely
+# isn't level, where a zero seed is a wrong answer rather than a head start.
+if [ "${BEAMPILOT_CALIBRATION:-instant}" = "live" ]; then
+  python3 -c "from openpilot.common.params import Params; Params().remove('CalibrationParams')"
+  echo "calibration: live -- openpilot will not engage until calibrationd converges"
+fi
+
 # Hand LONGITUDINAL (speed) control to openpilot. Without this, honda's
 # interface.py sets openpilotLongitudinalControl=False / pcmCruise=True, meaning
 # openpilot steers but expects the CAR's own ACC to manage speed -- and BeamNG

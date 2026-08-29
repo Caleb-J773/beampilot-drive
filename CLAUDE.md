@@ -181,6 +181,12 @@ context it was trained on — suspect framing first when a particular car behave
 Steering lock is per-vehicle: set `BEAMPILOT_STEER_LOCK_DEG` when switching cars (hold full lock,
 read `steering_wheel_deg` in the monitor).
 
+The camera also lands **off-centre** on some cars: it's placed relative to `veh:getPosition()`,
+the jbeam reference node, which isn't reliably on the centreline. Drives well regardless — lane
+position comes from the whole scene, not from the lens being at one exact spot — so this is a
+real imperfection that is usually *not* the cause of a given problem. `offRight` corrects it if a
+car tracks consistently to one side.
+
 BeamNG's stock dashboard camera can be used instead, but performs worse and carries heavy motion
 blur (disable it in graphics settings). `openpilot_cam` exists precisely because openpilot assumes
 a rigid lens with fixed intrinsics — head bob, look-ahead yaw, horizon stabilisation and FOV
