@@ -51,6 +51,22 @@ export BEAMPILOT_CALIBRATION="instant"
 # openpilot UI. Needs X11 and xdotool; falls back to monitor capture without
 # them. Windows whose class looks like a terminal/editor/browser are ignored,
 # so a terminal with "beamng" in the title isn't captured by mistake.
+# How the screen is read.
+#   auto   (default) X11 grab on an X11 session, desktop portal on Wayland.
+#   portal ask the compositor for a ScreenCast stream over PipeWire. REQUIRED on
+#          Wayland: Wayland forbids clients from reading the screen, so an X11
+#          grab there returns nothing and every frame comes out solid green (an
+#          all-zero NV12 buffer is RGB(0,135,0); real black is Y=16/U=V=128).
+#          Works on X11 too, and is worth considering there: you pick the window
+#          from a share dialog once (remembered afterwards via a restore token),
+#          which skips window detection entirely, and it measures smoother --
+#          50.00ms mean / 51.3ms max versus 49.96 / 66.8 for the X11 grab,
+#          because the frame is already in memory rather than the loop blocking
+#          on the X server. Needs gst-launch-1.0 with the pipewire plugin and a
+#          working xdg-desktop-portal.
+#   x11    force the classic grab.
+# export BEAMPILOT_CAPTURE_BACKEND="portal"
+
 export BEAMPILOT_CAM_WINDOW="beamng"
 # export BEAMPILOT_CAM_MONITOR="1"
 # export BEAMPILOT_CAM_REGION="0,0,1920,1080"

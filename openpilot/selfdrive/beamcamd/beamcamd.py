@@ -42,6 +42,29 @@ RETRACK_INTERVAL_S = env_float("BEAMPILOT_CAM_RETRACK_S", 2.0)
 # VisionIPC ring buffer depth, per stream.
 VIPC_BUFFER_COUNT = env_int("BEAMPILOT_VIPC_BUFFERS", 20)
 
+# How the screen is read: "x11" (mss), "portal" (xdg-desktop-portal ScreenCast
+# over PipeWire), or "auto".
+#
+# auto keeps X11 sessions on exactly the path they have always used, and only
+# reaches for the portal on Wayland -- where an X11 grab cannot work at all.
+# Wayland does not let a client read the screen, so mss returns nothing, the
+# NV12 buffer is never written, and an all-zero NV12 buffer decodes to
+# RGB(0,135,0): the "everything is green" report. Green is the signature of no
+# data, since real black is Y=16/U=V=128, not zeros.
+CAPTURE_BACKEND = os.environ.get("BEAMPILOT_CAPTURE_BACKEND", "auto").strip().lower()
+
+
+def choose_capture_backend() -> str:
+  """Resolve CAPTURE_BACKEND to "x11" or "portal"."""
+  if CAPTURE_BACKEND in ("x11", "portal"):
+    return CAPTURE_BACKEND
+  # An explicit region or monitor is an X11 concept, and someone who set one
+  # has said what they want; don't override it with a portal picker.
+  if os.environ.get("BEAMPILOT_CAM_REGION"):
+    return "x11"
+  from openpilot.selfdrive.beamcamd.window_capture import session_type
+  return "portal" if session_type() == "wayland" else "x11"
+
 
 def clamp_region(region: dict, bounds: dict) -> dict | None:
   """Intersect a capture rectangle with the X root window, or None if disjoint.
@@ -175,6 +198,20 @@ class FrameEncoder:
     # directly and a .tobytes() copy of ~4.8MB per frame is pure waste.
     return self.out
 
+  def encode_nv12(self, tight: bytes) -> np.ndarray:
+    """Place an already-NV12 frame into the padded layout.
+
+    The portal path gets here: GStreamer has already converted and scaled to
+    exactly w x h NV12, so there is nothing to do but move it into the strided
+    buffer -- no resize, no colour conversion.
+    """
+    h, w = self.h, self.w
+    y = np.frombuffer(tight, dtype=np.uint8, count=w * h).reshape(h, w)
+    uv = np.frombuffer(tight, dtype=np.uint8, count=(h // 2) * w, offset=w * h).reshape(h // 2, w)
+    self.y_view[:h, :w] = y
+    self.uv_view[:h // 2, :w] = uv
+    return self.out
+
 
 class FramePacer:
   """Fixed-rate pacing that DROPS a backlog instead of sprinting to clear it.
@@ -221,6 +258,80 @@ class FramePacer:
       self.next_frame += self.interval
 
 
+def _publish(server, pm, nv12, frame_id: int):
+  # Real monotonic-clock timestamp, matching cereal's own logMonoTime
+  # (time.monotonic()) -- NOT a synthetic frame_id*dt counter. modeld derives
+  # cameraOdometry.timestampEof from this, and locationd's _validate_timestamp
+  # compares that against the Kalman filter's real elapsed time; a fake,
+  # near-zero counter fails that check on every single frame, forever,
+  # permanently blocking deviceMotion.inputsOK (this exact bug also exists,
+  # unfixed, in openpilot's own reference system/camerad/webcam/camerad.py --
+  # it's just never exercised there since that driver is disabled here).
+  timestamp = time.monotonic_ns()
+
+  # KNOWN LIMITATION: the same frame goes to BOTH streams, so openpilot's
+  # "wide" camera is really a second copy of the narrow view. modeld sets
+  # has_wide_camera = use_extra_client or main_wide_camera (modeld.py), which
+  # is True here, so it applies dc.wide_road.intrinsics -- the calibration for
+  # a ~120 degree lens -- to an image that doesn't have that field of view.
+  # The model therefore misjudges how far objects and lane lines sit off to
+  # the sides, which shows up most in turns, where the real wide camera is
+  # what normally sees around the corner. Keep Experimental mode OFF: its
+  # end-to-end longitudinal policy leans much harder on wide-camera scene
+  # understanding. Fixing this properly needs a second BeamNG camera at a
+  # genuinely wide FOV published to VISION_STREAM_WIDE_ROAD.
+  server.send(VisionStreamType.VISION_STREAM_WIDE_ROAD, nv12, frame_id, timestamp, timestamp)
+  server.send(VisionStreamType.VISION_STREAM_NARROW_ROAD, nv12, frame_id, timestamp, timestamp)
+
+  # update cereal (wide road)
+  dat = messaging.new_message("wideRoadCameraState", valid=True)
+  msg = {"frameId": frame_id, "transform": TR, "sensor": "unknown"}
+  dat.wideRoadCameraState = msg
+  pm.send("wideRoadCameraState", dat)
+
+  # update cereal (narrow road)
+  dat = messaging.new_message("narrowRoadCameraState", valid=True)
+  msg = {"frameId": frame_id, "transform": TR, "sensor": "unknown"}
+  dat.narrowRoadCameraState = msg
+  pm.send("narrowRoadCameraState", dat)
+
+
+# Frames at which to check for a blank picture: once the stream should have
+# settled, then again later in case the source went away.
+_BLANK_CHECK_FRAMES = (40, 400)
+
+
+def _warn_if_blank(encoder: FrameEncoder, frame_id: int, backend: str):
+  """Say so when the published picture carries no image at all.
+
+  A uniform frame is the one failure that looks like a working pipeline: every
+  process runs, frames flow at 20Hz, and the driver just sees a flat colour.
+  Worse, the flat colour is *green* rather than black, because an untouched
+  buffer is Y=0/U=V=0 while real black is Y=16/U=V=128 -- so it doesn't even
+  read as "no signal". Cheap to detect, and it turns a baffling symptom into a
+  sentence.
+  """
+  if frame_id not in _BLANK_CHECK_FRAMES:
+    return
+  y = encoder.y_view[:encoder.h, :encoder.w]
+  # Subsample: a full 2.3MP min/max every frame would not be worth it, and a
+  # sparse grid is more than enough to tell "flat" from "a picture".
+  sample = y[::32, ::32]
+  if int(sample.max()) != int(sample.min()):
+    return
+  level = int(sample.min())
+  colour = "green" if level == 0 else ("black" if level <= 16 else f"flat (Y={level})")
+  msg = (f"[beamcamd] WARNING: the captured picture is completely {colour} at frame"
+         + f" {frame_id} -- openpilot is being fed no image.")
+  if backend == "x11" and level == 0:
+    msg += (" An all-zero frame means the X11 grab returned nothing, which is what happens"
+            + " on Wayland. Set BEAMPILOT_CAPTURE_BACKEND=portal to capture through"
+            + " xdg-desktop-portal instead.")
+  elif backend == "portal":
+    msg += " Check that the shared window/monitor is the one BeamNG is on."
+  print(msg, flush=True)
+
+
 def main():
   # openpilot's model input resolution. Not a capture setting -- the captured
   # region is rescaled to this regardless of your monitor size, and modeld
@@ -244,9 +355,28 @@ def main():
   if not usable:
     print("[beamcamd] cannot capture the screen; frames will be blank", flush=True)
 
-  sct = mss.MSS()
-  region, tracked_id = get_capture_region(sct)
+  backend = choose_capture_backend()
   encoder = FrameEncoder(W, H, stride, y_height, uv_height, uv_offset, size)
+  sct = region = tracked_id = None
+  portal_session = portal_source = None
+
+  if backend == "portal":
+    from openpilot.selfdrive.beamcamd.portal_capture import PortalError, open_portal_nv12
+    try:
+      portal_session, portal_source = open_portal_nv12(W, H)
+      print("[beamcamd] capturing via xdg-desktop-portal: PipeWire node"
+            + f" {portal_session.node_id}, source {portal_session.stream_size}", flush=True)
+    except (PortalError, OSError, ImportError) as e:
+      # Falling back to X11 on Wayland will produce green frames, so say why
+      # rather than leaving the user to work it out from the picture.
+      print(f"[beamcamd] portal capture unavailable ({type(e).__name__}: {e})", flush=True)
+      print("[beamcamd] falling back to X11 capture -- on Wayland this cannot read the"
+            + " screen and every frame will come out green.", flush=True)
+      backend = "x11"
+
+  if backend == "x11":
+    sct = mss.MSS()
+    region, tracked_id = get_capture_region(sct)
 
   # Everything that lives for the whole run is allocated by now, so promote it
   # out of the GC's reach and stop collecting. On a soft-realtime loop the cycle
@@ -274,9 +404,15 @@ def main():
   need_rediscover = False
   grab_errors = 0
 
+  # The portal picks its own source and streams only that, so there is no
+  # rectangle to track and no window to re-find.
+  if backend == "portal":
+    track_window = False
+
   while True:
     now = time.monotonic()
-    if (track_window or need_rediscover) and (now - last_retrack) > RETRACK_INTERVAL_S:
+    if backend == "x11" and (track_window or need_rediscover) \
+       and (now - last_retrack) > RETRACK_INTERVAL_S:
       last_retrack = now
 
       # The cheap path: re-read the geometry of the window we ALREADY found, by
@@ -311,6 +447,29 @@ def main():
               + f" at +{new_region['left']}+{new_region['top']}", flush=True)
         region = new_region
 
+    if backend == "portal":
+      tight = portal_source.read()
+      if tight is not None:
+        nv12 = encoder.encode_nv12(tight)
+        grab_errors = 0
+      else:
+        # No frame yet. A compositor legitimately sends nothing while the
+        # source is occluded or idle, so only a dead GStreamer is an error.
+        nv12 = encoder.out
+        if not portal_source.alive():
+          grab_errors += 1
+          if grab_errors == 1:
+            tail = portal_source.stderr_tail()
+            print("[beamcamd] the PipeWire capture pipeline exited"
+                  + (f":\n{tail}" if tail else " (no output)"), flush=True)
+      _warn_if_blank(encoder, frame_id, backend)
+      _publish(server, pm, nv12, frame_id)
+      frame_id += 1
+      if frame_id == 1:
+        pacer.reset()
+      pacer.wait()
+      continue
+
     # A failed grab must never kill the daemon -- see clamp_region's docstring
     # for what taking beamcamd down does to the rest of the stack. Clamping
     # prevents the common out-of-bounds case, but the window can still move
@@ -344,41 +503,8 @@ def main():
       # SOFT_DISABLE, so a gap in the camera stream disengages it mid-drive.
       nv12 = encoder.out
 
-    # Real monotonic-clock timestamp, matching cereal's own logMonoTime
-    # (time.monotonic()) -- NOT a synthetic frame_id*dt counter. modeld derives
-    # cameraOdometry.timestampEof from this, and locationd's _validate_timestamp
-    # compares that against the Kalman filter's real elapsed time; a fake,
-    # near-zero counter fails that check on every single frame, forever,
-    # permanently blocking deviceMotion.inputsOK (this exact bug also exists,
-    # unfixed, in openpilot's own reference system/camerad/webcam/camerad.py --
-    # it's just never exercised there since that driver is disabled here).
-    timestamp = time.monotonic_ns()
-
-    # KNOWN LIMITATION: the same frame goes to BOTH streams, so openpilot's
-    # "wide" camera is really a second copy of the narrow view. modeld sets
-    # has_wide_camera = use_extra_client or main_wide_camera (modeld.py), which
-    # is True here, so it applies dc.wide_road.intrinsics -- the calibration for
-    # a ~120 degree lens -- to an image that doesn't have that field of view.
-    # The model therefore misjudges how far objects and lane lines sit off to
-    # the sides, which shows up most in turns, where the real wide camera is
-    # what normally sees around the corner. Keep Experimental mode OFF: its
-    # end-to-end longitudinal policy leans much harder on wide-camera scene
-    # understanding. Fixing this properly needs a second BeamNG camera at a
-    # genuinely wide FOV published to VISION_STREAM_WIDE_ROAD.
-    server.send(VisionStreamType.VISION_STREAM_WIDE_ROAD, nv12, frame_id, timestamp, timestamp)
-    server.send(VisionStreamType.VISION_STREAM_NARROW_ROAD, nv12, frame_id, timestamp, timestamp)
-
-    # update cereal (wide road)
-    dat = messaging.new_message("wideRoadCameraState", valid=True)
-    msg = {"frameId": frame_id, "transform": TR, "sensor": "unknown"}
-    dat.wideRoadCameraState = msg
-    pm.send("wideRoadCameraState", dat)
-
-    # update cereal (narrow road)
-    dat = messaging.new_message("narrowRoadCameraState", valid=True)
-    msg = {"frameId": frame_id, "transform": TR, "sensor": "unknown"}
-    dat.narrowRoadCameraState = msg
-    pm.send("narrowRoadCameraState", dat)
+    _warn_if_blank(encoder, frame_id, backend)
+    _publish(server, pm, nv12, frame_id)
 
     # update frame count / id
     frame_id += 1

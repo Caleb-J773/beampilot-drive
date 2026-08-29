@@ -166,6 +166,13 @@ def build_sections() -> list[Section]:
               "lua", choices=["lua", "joystick"]),
     ]),
     Section("Camera", "beamcamd captures the BeamNG window off your desktop.", [
+      Setting("BEAMPILOT_CAPTURE_BACKEND", "Capture backend",
+              "auto picks X11 grabbing on X11 and the desktop portal on Wayland. portal asks you to"
+              + " pick the window once (a share dialog, remembered afterwards) and streams it over"
+              + " PipeWire -- required on Wayland, and on X11 it is smoother and skips window"
+              + " detection entirely, at the cost of needing gst-launch-1.0 and a desktop portal."
+              + " x11 forces the classic grab; on Wayland that yields all-green frames.",
+              "auto", choices=["auto", "x11", "portal"]),
       Setting("BEAMPILOT_CAM_WINDOW", "Track window",
               "Match text for the BeamNG window; it follows the window as it moves or resizes. Blank = capture a whole monitor. Needs X11 and xdotool.",
               "beamng"),
