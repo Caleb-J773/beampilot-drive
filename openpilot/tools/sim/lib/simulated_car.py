@@ -8,6 +8,10 @@ from openpilot.common.params import Params
 from openpilot.selfdrive.pandad.pandad_api_impl import can_list_to_can_capnp
 from openpilot.tools.sim.lib.common import SimulatorState
 
+# honda_bosch_radarless's GEARBOX_AUTO.GEAR_SHIFTER value table
+# (VAL_ 401/419 in opendbc/dbc/generator/honda/_gearbox_common.dbc).
+GEAR_SHIFTER_VALUES = {"park": 1, "reverse": 2, "neutral": 3, "drive": 4}
+
 
 class SimulatedCar:
   """Simulates a honda civic 2022 (panda state + can messages) to OpenPilot"""
@@ -46,11 +50,15 @@ class SimulatedCar:
 
     msg.append(self.packer.make_can_msg("SCM_BUTTONS", 0, {"CRUISE_BUTTONS": simulator_state.cruise_button}))
 
-    msg.append(self.packer.make_can_msg("GEARBOX_AUTO", 0, {"GEAR_SHIFTER": 4}))
+    msg.append(self.packer.make_can_msg("GEARBOX_AUTO", 0,
+                                        {"GEAR_SHIFTER": GEAR_SHIFTER_VALUES.get(simulator_state.gear, 4)}))
     msg.append(self.packer.make_can_msg("GAS_PEDAL_2", 0, {}))
     msg.append(self.packer.make_can_msg("SEATBELT_STATUS", 0, {"SEATBELT_DRIVER_LATCHED": 1}))
     msg.append(self.packer.make_can_msg("STEER_STATUS", 0, {"STEER_TORQUE_SENSOR": simulator_state.user_torque}))
-    msg.append(self.packer.make_can_msg("STEERING_SENSORS", 0, {"STEER_ANGLE": simulator_state.steering_angle}))
+    msg.append(self.packer.make_can_msg("STEERING_SENSORS", 0, {
+      "STEER_ANGLE": simulator_state.steering_angle,
+      "STEER_ANGLE_RATE": simulator_state.steering_rate,
+    }))
     msg.append(self.packer.make_can_msg("VSA_STATUS", 0, {}))
     msg.append(self.packer.make_can_msg("STANDSTILL", 0, {"WHEELS_MOVING": 1 if simulator_state.speed >= 1.0 else 0}))
     msg.append(self.packer.make_can_msg("STEER_MOTOR_TORQUE", 0, {}))
@@ -62,7 +70,10 @@ class SimulatedCar:
                                     {
                                       "MAIN_ON": 1,
                                       "LEFT_BLINKER": simulator_state.left_blinker,
-                                      "RIGHT_BLINKER": simulator_state.right_blinker
+                                      "RIGHT_BLINKER": simulator_state.right_blinker,
+                                      # carstate.py reads parkingBrake off the SCM message for
+                                      # Bosch cars, not off EPB_STATUS.
+                                      "PARKING_BRAKE_ON": simulator_state.parking_brake,
                                     }))
     msg.append(self.packer.make_can_msg("POWERTRAIN_DATA", 0,
                                     {

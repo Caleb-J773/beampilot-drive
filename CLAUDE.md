@@ -8,18 +8,36 @@ openpilot fork that drives a car in **BeamNG.drive** (the consumer Steam game).
 
 ## Architecture
 
-Stock openpilot processes run **unmodified**. Only two daemons are ours, plus one BeamNG mod:
+Two daemons are ours, plus one BeamNG mod. Stock openpilot processes are **almost** unmodified:
+these carry small, clearly-marked beampilot patches, all env-gated. `grep -rn BEAMPILOT_
+openpilot/` finds them all. Every one defaults to upstream behaviour with an unset environment
+**except** the blind spot lane change abort, which defaults on — and that one is still inert
+upstream, because it only ever fires on `carState.leftBlindspot`/`rightBlindspot` and no car this
+fork simulates has BSM messages in its DBC.
+
+| File | Patch |
+|---|---|
+| `selfdrive/controls/lib/desire_helper.py` | `BEAMPILOT_AUTO_LANE_CHANGE` — commit on the blinker alone; `BEAMPILOT_LANE_CHANGE_ABORT` — cancel one in flight on a blind spot |
+| `selfdrive/controls/lib/drive_helpers.py` | `BEAMPILOT_MAX_LAT_ACCEL` / `_JERK` / `MAX_CURVATURE` |
+| `selfdrive/controls/lib/longitudinal_planner.py` | `BEAMPILOT_ACCEL_SCALE` / `_DECEL_SCALE` |
+| `selfdrive/selfdrived/selfdrived.py` | `BEAMPILOT_IGNORE_COMM_ISSUE` |
+| `selfdrive/car/card.py` | `BEAMPILOT_BSM` — overlay blind spot onto `carState`; `BEAMPILOT_RADAR` — fill in the empty `RadarData` (see gotchas) |
+| `selfdrive/controls/radard.py` | `BEAMPILOT_RADAR_LEADS` — let a ground-truth track be the lead with no vision confirmation |
+| `selfdrive/selfdrived/selfdrived.py` | the "Lane Change Cancelled" alert, added straight to the `AlertManager` |
+| `selfdrive/ui/onroad/augmented_road_view.py` | renders `BlindSpotRenderer` at the file's own "custom UI extension point" |
+| `system/manager/process_config.py` | adds `beamngd`/`beamcamd`, drops the hardware-only processes |
 
 ```
 BeamNG.drive
   │  (Lua mod: tools/beamng_mod/beampilot_bridge)
-  │  UDP 49152  telemetry out  ──────────┐
-  │  UDP 49153  control in     ◄───────┐ │
+  │  UDP 49152  telemetry out  ──────────┐   (+ blind spot flags in dashLights)
+  │  UDP 49153  control in     ◄───────┐ │   (+ BSM tuning, re-sent every 2s)
   ▼                                    │ │
 screen  ──► beamcamd.py ──► VisionIPC ─┼─┼──► modeld ──► modelV2
                                        │ │                  │
             beamngd.py ────────────────┘ │             plannerd/controlsd
               ▲  fake CAN/IMU/GPS        │                  │
+              │  UDP 49154 ──► card ─────┼──► carState.leftBlindspot/rightBlindspot
               └───────────────────────────┘         controlsState.desiredCurvature
 ```
 
@@ -47,6 +65,15 @@ CAN only flows **into** openpilot (fake sensors), never back into the game.
 | `openpilot/selfdrive/beamcamd/portal_capture.py` | Wayland capture: xdg-desktop-portal ScreenCast + PipeWire |
 | `tools/beamng_mod/beampilot_bridge/lua/vehicle/protocols/beampilot.lua` | the BeamNG mod: telemetry out, control in |
 | `tools/beamng_mod/openpilot_cam/lua/ge/.../openpilot.lua` | rigid, FOV-matched camera (25.70° vertical). **Required** — `beampilot.lua` selects it by name at spawn |
+| `openpilot/common/beampilot_bsm.py` | BSM wire format + the `beamngd`→`card` socket, and the tuning pushed down to the mod |
+| `openpilot/common/beampilot_radar.py` | radar wire format + the `mod`→`card` socket (one hop; no relay) |
+| `openpilot/selfdrive/beamngd/test_bsm.py` | BSM unit tests (`uv run python ...`) |
+| `openpilot/selfdrive/controls/lib/test_desire_helper_bsm.py` | lane change state machine: refusing to start, and cancelling in flight |
+| `openpilot/selfdrive/beamngd/test_radar.py` | radar wire format, receiver, and a cross-language check against the real Lua encoder |
+| `openpilot/selfdrive/beamngd/test_carstate_signals.py` | gear / parking brake / steering rate round-tripped through the Honda DBC |
+| `openpilot/selfdrive/controls/test_radard_beampilot.py` | radar-only lead selection, including the in-lane test on a bend |
+| `openpilot/selfdrive/ui/onroad/blindspot_renderer.py` | the onroad mirror lamps (amber chevrons, steady/flashing) |
+| `tools/beamng_mod/test_beampilot_bsm.lua` | BSM zone geometry tests against BeamNG's real `mathlib` (`luajit ...`) |
 | `openpilot/tools/sim/lib/simulated_car.py` | fake Honda CAN packing (shared with MetaDrive bridge) |
 | `openpilot/tools/sim/lib/simulated_sensors.py` | fake IMU/GPS/DM publishing (shared) |
 | `config_beampilot.sh` | car fingerprint, GPU backend, UI size |
@@ -69,6 +96,11 @@ engaged above 20 mph. Requires `BEAMPILOT_AUTO_LANE_CHANGE=1` (set in config): s
 also demands a steering-wheel nudge (`desire_helper.py`'s `torque_applied`), which can never
 happen here since `beamngd` reports `user_torque = 0.0`, so a signalled change would arm into
 `preLaneChange` and stall there forever.
+
+BSM gates both ends of that: a change will not start into an occupied lane (stock behaviour,
+newly reachable), and one already under way is cancelled if the lane fills up within
+`BEAMPILOT_LANE_CHANGE_ABORT_S` (beampilot's own addition). A cancel returns to `preLaneChange`
+with the blinker still armed, so it resumes on its own once the lane clears.
 
 ## Driving limits
 
@@ -127,7 +159,84 @@ These were each a real bug that cost significant debugging time. Don't regress t
 - **`releaseControl()` must only fire on the disengage edge** (`isControlling` flag). Firing it
   every not-engaged tick fights and beats the player's own WASD input.
 - **Lua locals must be declared above every function that references them**, or Lua silently
-  creates an implicit global instead of using the closure variable.
+  creates an implicit global instead of using the closure variable. `luajit -bl <file> | grep
+  GSET` catches this: a clean file writes no globals at all.
+- **radarTracks must go through `card`, not alongside it.** `RadarInterfaceBase.update()` returns
+  an EMPTY `RadarData` every 5th frame, so card is *already* publishing `radarTracks` at 20Hz.
+  msgq permits a second publisher, so a `PubMaster` in `beamngd` binds happily -- and then
+  radard sees our points and card's empties alternating, and the lead flickers. Fill in the
+  RadarData card is already building instead.
+- **`radard.get_lead()` ignores radar unless the CAMERA already sees a lead** (`lead_prob > .5`;
+  the only exception is `potential_low_speed_lead`, below `V_EGO_STATIONARY`). Ground truth can
+  therefore only REFINE by default, which is useless for the case the wide-camera problem
+  causes. `BEAMPILOT_RADAR_LEADS` lifts it; the in-lane test uses `modelV2.position` so it
+  follows a bend instead of meaning "straight ahead".
+- **A radar-only lead has to report `modelProb = 1.0`.** `long_mpc.py` gates its forward
+  collision check on `modelProb > 0.9`, so passing the camera's opinion (0.0) would silently
+  disable FCW on exactly the leads the camera missed. `process_lead` itself only checks
+  `present`, so following and braking work either way.
+- **`yRel` is LEFT positive** (`car.capnp`: "m in car frame, left positive"), while
+  `modelV2.position`/`leadsV3` are in the device frame, which is **y-RIGHT**. radard bridges the
+  two with `-lead.y[0]`; anything producing radar points has to do the same.
+- **BSM cannot go in over the fake CAN.** `HONDA_CIVIC_2022`'s DBC dict has no `Bus.body` entry,
+  so `honda/carstate.py` never builds the body parser that `BSM_STATUS_LEFT`/`_RIGHT` live in.
+  Adding one means editing `opendbc`, which is a **git submodule** pointing at `commaai/opendbc`
+  — those edits cannot be committed here, so it would work on one machine and nowhere else.
+  Hence the loopback UDP hop into `card.state_update()`.
+- **BSM rides in spare `dashLights` bits (4..7), not in new telemetry struct fields.**
+  `parse_telemetry()` rejects any packet whose length is not an exact match, so growing the
+  struct turns "old mod, no BSM" into "old mod, no telemetry at all".
+- **A stale BSM feed must fail to *clear*, not to *blocked*.** A latched warning blocks every
+  lane change for the rest of the drive with nothing on screen to explain it. 0.5s timeout.
+- **The capture rectangle's ASPECT has to be 1928/1208 (1.5960), not just any rectangle.**
+  `FrameEncoder.encode` resizes straight to the frame size with no aspect preservation, so a 16:9
+  window is squeezed ~11% horizontally: vertically right (the mod renders 25.70 deg VERTICAL) but
+  spanning 44.15 deg where the intrinsics claim 40.01. Depends on the window's shape, not its
+  size -- 1440p is exactly as wrong as 1080p. `BEAMPILOT_CAM_ASPECT=crop` trims the sides;
+  cropping top/bottom instead would cut the vertical field and is never done. The real fix is a
+  1928x1208 window: exact aspect, no crop, no resample.
+- **The BSM flag needs a hold, not just a raw read** (`BSM_HOLD_SECONDS`, 0.4s). A vehicle
+  hovering on the zone boundary chatters at the scan rate, and since `desire_helper.py` cancels
+  an in-flight lane change on this flag, chatter would abort the manoeuvre and instantly restart
+  it. Staleness still wins over the hold.
+- **There is no way to add an `EventName`.** The enum lives in `opendbc/car/car.capnp`, a
+  submodule. For a one-off alert, build an `Alert`, set `alert_type` (any string) and
+  `event_type = ET.WARNING`, and append it to the list `selfdrived.update_alerts()` hands to
+  `AlertManager.add_many` — the manager keys on that string, so no schema change is needed.
+- **`selfdrived.py` imports two different `Priority` symbols.** `common.realtime.Priority` is
+  thread scheduling; `selfdrived.events.Priority` is alert ordering. The second has to be
+  aliased or it silently shadows the first.
+- **The UI is Python + raylib** (`pyray`), not Qt. `augmented_road_view.py` has an explicit
+  "custom UI extension point"; a widget subclasses `Widget` and gets `_update_state()` called
+  from `render()` for free. Size everything as a fraction of the passed rect — the UI runs at
+  2160x1080 (`BIG=1`) or 536x240 (`BIG=0`), times `SCALE`.
+- **`rl.draw_line_ex` has butt caps**, so two strokes meeting at a point leave a notch. Cap it
+  with a disc — and dim by colour value, never alpha, or the overlap composites into a bright
+  spot exactly where the disc is.
+- **A cancelled lane change goes to `preLaneChange`, not `off`.** The blinker is still on, so it
+  re-commits by itself once the lane clears ("wait for the gap"), and `selfdrived.py` only raises
+  `laneChangeBlocked` in `preLaneChange` — so `off` would abort silently with no on-screen reason.
+  `auto_lane_change_timer` is zeroed on every tick spent outside `preLaneChange`, which is what
+  makes the re-commit wait out the full delay instead of strobing.
+- **Use `obj:getDirectionVectorRight()` for handedness**, don't derive it from a cross product.
+  Getting it backwards swaps left and right BSM, which looks plausible right up until it matters.
+- **A `now - last > interval` gate undershoots on a fast caller.** At beamngd's 100Hz tick, a
+  50ms gate fires every 60ms (16.7Hz). Halving the interval to compensate overshoots to 33Hz --
+  which is what the driver-monitoring rate complaint in the README was. Use `PhaseClock`
+  (advance a phase by one interval per fire); measures 20.0Hz exactly.
+- **Reusing a Lua table across scans means `table.sort` sorts the leftovers too.** Radar rows are
+  pooled to keep the GC out of a 20Hz loop, so the array still holds rows from whenever traffic
+  was heaviest. Sort the ACTIVE PREFIX only, or vehicles that have gone get re-reported.
+- **`CANParser.vl` only materialises a message once `vl` has been INDEXED for it.** `update()`
+  alone leaves the values at zero forever. Never bites the real stack (carstate.py reads `cp.vl`
+  every cycle) but it makes a test read zeros and pass on nothing. The parser also ignores a
+  packet whose timestamp has not advanced, and drops a repeat whose counter has not moved.
+- **Vehicle Lua cannot read the environment.** Anything configurable in the mod has to travel
+  down inside the control packet; `beamngd` re-sends the BSM block every 2s so a vehicle reload
+  (which resets the mod to its own defaults) picks the settings back up.
+- **`table.clear` exists in BeamNG's Lua but not in a bare `luajit`.** `require("table.clear")`
+  in any standalone harness, or the scan dies inside its `pcall` and the symptom is a feature
+  that silently never fires.
 - **`launch_beampilot.sh` needs its shebang.** Without it, fish's ENOEXEC fallback runs it under
   `dash`, `source` fails silently, and the whole config is quietly lost.
 - **An all-green picture means the capture produced NO data — it is not a colour bug.** An

@@ -5,6 +5,7 @@ from openpilot.cereal.visionipc import VisionStreamType
 from openpilot.selfdrive.ui import UI_BORDER_SIZE
 from openpilot.selfdrive.ui.ui_state import ui_state, UIStatus
 from openpilot.selfdrive.ui.onroad.alert_renderer import AlertRenderer
+from openpilot.selfdrive.ui.onroad.blindspot_renderer import BlindSpotRenderer
 from openpilot.selfdrive.ui.onroad.driver_state import DriverStateRenderer
 from openpilot.selfdrive.ui.onroad.hud_renderer import HudRenderer
 from openpilot.selfdrive.ui.onroad.model_renderer import ModelRenderer
@@ -47,6 +48,7 @@ class AugmentedRoadView(CameraView):
     self._hud_renderer = HudRenderer()
     self.alert_renderer = AlertRenderer()
     self.driver_state_renderer = DriverStateRenderer()
+    self.blindspot_renderer = BlindSpotRenderer()
 
   def _render(self, rect):
     # Only render when system is started to avoid invalid data access
@@ -86,6 +88,11 @@ class AugmentedRoadView(CameraView):
 
     # Custom UI extension point - add custom overlays here
     # Use self._content_rect for positioning within camera bounds
+
+    # beampilot: blind spot lamps. Drawn last so they sit over the model's path
+    # rendering, and self-hiding when both sides are clear -- on a car with no
+    # blind spot feed this draws nothing at all.
+    self.blindspot_renderer.render(self._content_rect)
 
     # End clipping region
     rl.end_scissor_mode()

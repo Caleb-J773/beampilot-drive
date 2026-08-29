@@ -23,6 +23,25 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # selects by name at spawn.
 MODS = ("beampilot_bridge", "openpilot_cam")
 
+# Features that arrived after the first release, and a string that only appears
+# in a mod new enough to have them. Only consulted for copied installs -- a
+# symlinked mod is the repo, so it is never behind it.
+MOD_FEATURES = {
+  "beampilot_bridge": {
+    "blind spot monitoring (BSM)":
+      ("lua/vehicle/protocols/beampilot.lua", "BSM_DEFAULTS"),
+  },
+}
+
+
+def _mod_has(mod_dir, marker):
+  relative_path, needle = marker
+  try:
+    with open(os.path.join(mod_dir, relative_path), encoding="utf-8", errors="replace") as fh:
+      return needle in fh.read()
+  except OSError:
+    return False
+
 GREEN, RED, YELLOW, BLUE, DIM, BOLD, RESET = (
   "\033[32m", "\033[31m", "\033[33m", "\033[36m", "\033[2m", "\033[1m", "\033[0m")
 
@@ -438,6 +457,13 @@ def check_beamng():
       print(f"  {OK} {name} installed (symlink -> repo, edits apply live)")
     elif os.path.exists(mod):
       print(f"  {WARN} {name} exists but is not a link to this repo: {mod}")
+      # A copied (rather than linked) mod does not follow git pull, and the
+      # symptom of a stale one is a feature that is simply never there --
+      # blind spot monitoring stays silent forever with nothing to see in any
+      # log. Name the specific thing that is missing rather than leaving it.
+      for feature, marker in MOD_FEATURES.get(name, {}).items():
+        if not _mod_has(mod, marker):
+          print(f"      {WARN} this copy predates {feature}; re-install to get it")
     else:
       print(f"  {INFO} {name} not installed yet")
       missing.append(name)

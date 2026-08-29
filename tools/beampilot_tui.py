@@ -165,6 +165,55 @@ def build_sections() -> list[Section]:
               "lua injects into the game directly. joystick needs axes bound in BeamNG's Options > Controls.",
               "lua", choices=["lua", "joystick"]),
     ]),
+    Section("Perception", "What the mod can see that a camera on a screen cannot: other traffic, exactly.", [
+      Setting("BEAMPILOT_BSM", "Blind spot monitoring",
+              "Detected in the BeamNG mod, so it works off the simulator's own traffic rather than the camera."
+              + " Blocks a signalled lane change and shows \"Car Detected in Blindspot\"."
+              + " Needs the mod reinstalled if you are upgrading from an older build.",
+              "1", choices=["1", "0"]),
+      Setting("BEAMPILOT_LANE_CHANGE_ABORT", "Cancel lane change",
+              "Abort a lane change already under way if the target lane fills up. Stock openpilot only"
+              + " checks the blind spot on the way in and never looks again. Holds the blinker armed and"
+              + " re-commits by itself once the lane clears.",
+              "1", choices=["1", "0"]),
+      Setting("BEAMPILOT_LANE_CHANGE_ABORT_S", "Cancel window (s)",
+              "How late into the move a cancel may still fire. Past the halfway point the car is mostly"
+              + " in the new lane and swerving back is its own hazard. Set very high to allow it any time.",
+              "2.0", numeric=True, step=0.5),
+      Setting("BEAMPILOT_BSM_APPROACHING", "Warn on closing traffic",
+              "Also count a car that is not beside you yet but is closing fast enough to be there mid-manoeuvre.",
+              "1", choices=["1", "0"]),
+      Setting("BEAMPILOT_BSM_WIDTH_M", "Zone width (m)",
+              "How far out from your flank the zone reaches. 3.6 is about one lane; raise it for wide lanes.",
+              "3.6", numeric=True, step=0.2),
+      Setting("BEAMPILOT_BSM_REAR_M", "Zone rear reach (m)",
+              "How far past your rear bumper the zone extends.",
+              "4.0", numeric=True, step=0.5),
+      Setting("BEAMPILOT_BSM_INDICATOR", "On-screen indicator",
+              "The amber chevrons at the edges of the road view. Off keeps the blind spot gating lane"
+              + " changes with nothing shown for it. Already invisible whenever both sides are clear.",
+              "1", choices=["1", "0"]),
+      Setting("BEAMPILOT_BSM_DEBUG", "Log state changes",
+              "Prints every blind spot change to the beamngd terminal and the BeamNG console. For tuning the zone.",
+              "0", choices=["0", "1"]),
+      Setting("BEAMPILOT_RADAR", "Ground-truth radar",
+              "Reports nearby traffic as radar points. This car is radarless, so without it openpilot"
+              + " finds the lead with the camera alone -- the same camera that is fed the wrong"
+              + " intrinsics, and distance to the car in front is what that gets wrong.",
+              "1", choices=["1", "0"]),
+      Setting("BEAMPILOT_RADAR_LEADS", "Radar can find a lead alone",
+              "Let a track become the lead with no confirmation from the camera. Stock openpilot refuses,"
+              + " because a real radar has false positives; these points are ground truth and cannot."
+              + " Off means radar only refines a lead the camera already found.",
+              "1", choices=["1", "0"]),
+      Setting("BEAMPILOT_RADAR_RANGE_M", "Radar range (m)",
+              "About as far as real automotive radar reaches.",
+              "150", numeric=True, step=10.0),
+      Setting("BEAMPILOT_SIGNAL_AUTO_CANCEL", "Cancel signal after a change",
+              "Switch the blinker off once a lane change finishes. Nothing in the game cancels an"
+              + " indicator that was never physically stalked.",
+              "1", choices=["1", "0"]),
+    ]),
     Section("Camera", "beamcamd captures the BeamNG window off your desktop.", [
       Setting("BEAMPILOT_CAPTURE_BACKEND", "Capture backend",
               "auto picks X11 grabbing on X11 and the desktop portal on Wayland. portal asks you to"
@@ -173,6 +222,13 @@ def build_sections() -> list[Section]:
               + " detection entirely, at the cost of needing gst-launch-1.0 and a desktop portal."
               + " x11 forces the classic grab; on Wayland that yields all-green frames.",
               "auto", choices=["auto", "x11", "portal"]),
+      Setting("BEAMPILOT_CAM_ASPECT", "Aspect handling",
+              "openpilot's frame is 1.596 wide; a full-screen 16:9 window is 1.778, so the picture gets"
+              + " squeezed ~11% horizontally and everything reads as closer to the centre of the lane"
+              + " than it is. crop trims the sides first, leaving exactly the 40.01 deg the model's"
+              + " intrinsics assume. stretch is the old behaviour. Better than either: size the BeamNG"
+              + " window 1928x1208, then nothing is cropped OR resampled.",
+              "crop", choices=["crop", "stretch"]),
       Setting("BEAMPILOT_CAM_WINDOW", "Track window",
               "Match text for the BeamNG window; it follows the window as it moves or resizes. Blank = capture a whole monitor. Needs X11 and xdotool.",
               "beamng"),

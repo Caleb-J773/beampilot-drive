@@ -9,6 +9,8 @@ from openpilot.cereal import log
 from opendbc.car.structs import car
 
 from openpilot.common.params import Params
+from openpilot.common.beampilot_bsm import BlindSpotReceiver
+from openpilot.common.beampilot_radar import RadarReceiver
 from openpilot.common.realtime import config_realtime_process, Priority, Ratekeeper
 from openpilot.common.swaglog import cloudlog, ForwardingHandler
 
@@ -157,6 +159,21 @@ class Car:
     # card is driven by can recv, expected at 100Hz
     self.rk = Ratekeeper(100, print_delay_threshold=None)
 
+    # beampilot BSM. The simulated car is a HONDA_CIVIC_2022, whose DBC has no
+    # BSM messages at all, so blind spot state cannot arrive over the fake CAN
+    # the way it would on a real Civic (B-CAN, a separate body DBC). beamngd
+    # sends it here directly instead; see openpilot/common/beampilot_bsm.py.
+    # None whenever BEAMPILOT_BSM is off or the port is taken, in which case
+    # carState keeps exactly what the CAN decode produced.
+    self.bsm = BlindSpotReceiver.create()
+
+    # beampilot ground-truth radar. This car is BOSCH_RADARLESS, so
+    # RadarInterfaceBase.update() hands back an EMPTY RadarData at 20Hz and
+    # radard has nothing but the camera to find a lead with. The BeamNG mod
+    # sends real points straight here; they are filled into that same empty
+    # RadarData below, which keeps card the only publisher of radarTracks.
+    self.radar = RadarReceiver.create()
+
   def state_update(self) -> tuple[car.CarState, structs.RadarDataT | None]:
     """carState update loop, driven by can"""
 
@@ -166,8 +183,25 @@ class Car:
     # Update carState from CAN
     CS = self.CI.update(can_list)
 
+    # Overlay the blind spot flags the BeamNG mod detected. Downstream this is
+    # ordinary carState: desire_helper.py refuses to start a lane change into
+    # an occupied side, and selfdrived.py raises laneChangeBlocked.
+    if self.bsm is not None:
+      CS.leftBlindspot, CS.rightBlindspot = self.bsm.update()
+
     # Update radar tracks from CAN
     RD: structs.RadarDataT | None = self.RI.update(can_list)
+
+    # ...and, on beampilot, from the simulator's own view of nearby traffic.
+    # RD is not None on the ticks opendbc considers a radar frame (every 5th,
+    # i.e. 20Hz), which is exactly the rate radard wants, so this rides along
+    # with the existing cadence rather than inventing one.
+    if self.radar is not None and RD is not None:
+      tracks = self.radar.update()
+      if tracks:
+        RD.points = [structs.RadarData.RadarPoint(trackId=track_id, dRel=d_rel,
+                                                  yRel=y_rel, vRel=v_rel)
+                     for track_id, d_rel, y_rel, v_rel in tracks]
 
     self.sm.update(0)
 

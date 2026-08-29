@@ -31,7 +31,8 @@ you spawn, there's no real wide-angle camera, and it will drive into things if y
 - [Install](#install)
 - [Running it](#running-it)
 - [Configuration](#configuration)
-  - [Camera capture](#camera-capture) · [Wayland](#wayland)
+  - [Blind spot monitoring](#blind-spot-monitoring-bsm) · [Ground-truth radar](#ground-truth-radar)
+  - [Camera capture](#camera-capture) · [Aspect ratio](#aspect-ratio) · [Wayland](#wayland)
 - [How it works](#how-it-works)
 - [Knowledge base](#knowledge-base) — the non-obvious parts, in detail
 - [Troubleshooting](#troubleshooting)
@@ -337,7 +338,12 @@ Too low makes openpilot oversteer, too high makes it run wide.
 | `BEAMPILOT_KEY_SET` / `_RESUME` / `_CANCEL` | `i` / `o` / `u` | Cruise keys, single letters. |
 | `BEAMPILOT_CRUISE_STEP_MPH` | `1.0` | Per-tap speed change. |
 | `BEAMPILOT_AUTO_LANE_CHANGE` | `1` | Signal alone commits a lane change. Required here. |
+| `BEAMPILOT_BSM` | `1` | Blind spot monitoring. See [below](#blind-spot-monitoring-bsm). |
+| `BEAMPILOT_LANE_CHANGE_ABORT` | `1` | Cancel a lane change in progress if the target lane fills up. |
+| `BEAMPILOT_SIGNAL_AUTO_CANCEL` | `1` | Switch the blinker off once a lane change finishes. |
+| `BEAMPILOT_RADAR` | `1` | Ground-truth lead detection. See [below](#ground-truth-radar). |
 | `BEAMPILOT_CONTROL_MODE` | `lua` | `lua` or `joystick`. |
+| `BEAMPILOT_CAM_ASPECT` | `crop` | `crop` or `stretch`. See [Aspect ratio](#aspect-ratio). |
 | `BEAMPILOT_CAM_WINDOW` | `beamng` | Track the game window by name/class. See [Camera capture](#camera-capture). |
 | `BEAMPILOT_CAM_MONITOR` | `1` | Whole-monitor fallback. |
 | `BEAMPILOT_CAM_REGION` | unset | `left,top,width,height`, a fixed rectangle. |
@@ -352,6 +358,141 @@ Too low makes openpilot oversteer, too high makes it run wide.
 > under `SIMULATION`, this one changes what openpilot *does*: `commIssue` is registered as both
 > `NO_ENTRY` and `SOFT_DISABLE`, so suppressing it means openpilot keeps steering on stale model
 > output if `modeld` stalls or dies, instead of handing back control. The event is still logged.
+
+### Blind spot monitoring (BSM)
+
+The Lua mod watches every other vehicle in the scene and reports whether one is sitting in
+either blind spot. openpilot then acts on it in two places:
+
+1. **It refuses to start a lane change** into an occupied side, and shows *"Car Detected in
+   Blindspot"*. This part is stock openpilot — it has always been able to do it, there was just
+   never anything feeding `carState.leftBlindspot` / `rightBlindspot`.
+2. **It cancels a lane change already under way** if the target lane fills up mid-move. This
+   part is not stock. Upstream checks the blind spot exactly once, on the way in, and never
+   looks again — defensible on a real car, where the driver had to nudge the wheel to commit
+   and is watching the mirror the whole way across. Here `BEAMPILOT_AUTO_LANE_CHANGE` commits on
+   the blinker alone, so once the move starts nothing at all is watching the lane you are moving
+   into.
+
+A cancel drops the desire immediately — the model steers back to the lane you came from — and
+returns to the *armed* state rather than giving up. The blinker is still on, so as soon as the
+lane clears it re-commits by itself after the usual delay: **wait for the gap**, not "forget
+about it". Turning the blinker off cancels it outright.
+
+There is a deliberate limit: past `BEAMPILOT_LANE_CHANGE_ABORT_S` (default 2 s) into the move the
+car is mostly in the new lane, the vehicle now in the blind spot is behind it rather than beside
+it, and swerving back across is its own hazard — so beyond that it commits and finishes.
+
+Detection runs in the game, not off the camera. `mapmgr` gives vehicle Lua the position,
+velocity and orientation of every other vehicle — the same data BeamNG's own AI uses for traffic
+awareness — so the mod tests an oriented box hung off each flank against each vehicle's own
+bounding box. A long trailer alongside counts even though its centre is metres away.
+
+The zone is measured from **your** vehicle's body, so it fits whatever you spawn. Defaults
+roughly follow SAE J2802: it starts level with the driver's shoulder, ends a few metres past the
+rear bumper, and is one lane wide.
+
+```
+                 frontM (1.5 m behind the front bumper)
+                    |
+      +-------------v--------------------+   <- outerM (3.6 m out from the flank)
+      |                                  |
+[==== your car ====]                     |
+      |                                  |
+      +----------------------------------+   <- innerM (0.2 m out from the flank)
+                                         ^
+                        rearM (4.0 m behind the rear bumper)
+```
+
+| Setting | Default | |
+|---|---|---|
+| `BEAMPILOT_BSM` | `1` | Master switch. `0` binds no socket and leaves `carState` untouched. |
+| `BEAMPILOT_LANE_CHANGE_ABORT` | `1` | Cancel a lane change already under way when the target lane fills up. |
+| `BEAMPILOT_LANE_CHANGE_ABORT_S` | `2.0` | How late into the move a cancel may still fire. Set very high to allow it at any point. |
+| `BEAMPILOT_BSM_APPROACHING` | `1` | Also warn about a car that is not beside you yet but is closing fast enough to be there mid-manoeuvre. |
+| `BEAMPILOT_BSM_APPROACH_S` | `2.0` | How far ahead to project that closing car, in seconds. |
+| `BEAMPILOT_BSM_APPROACH_MAX_M` | `20.0` | Cap on that projection. |
+| `BEAMPILOT_BSM_FRONT_M` | `1.5` | Forward edge, behind the front bumper. |
+| `BEAMPILOT_BSM_REAR_M` | `4.0` | Rear edge, behind the rear bumper. |
+| `BEAMPILOT_BSM_INNER_M` | `0.2` | Inner edge, out from your flank. |
+| `BEAMPILOT_BSM_WIDTH_M` | `3.6` | Outer edge, out from your flank. About one lane. |
+| `BEAMPILOT_BSM_HEIGHT_M` | `2.0` | Half-height, so traffic on an overpass is not "beside" you. |
+| `BEAMPILOT_BSM_MIN_SPEED_MS` | `1.4` | Below this, report nothing. |
+| `BEAMPILOT_BSM_RANGE_M` | `60.0` | Distance pre-filter before the box test. |
+| `BEAMPILOT_BSM_IGNORE_TOUCHING` | `1` | Skip vehicles in contact with you — suppresses a towed trailer. |
+| `BEAMPILOT_BSM_RATE_HZ` | `20` | Detection rate inside the mod. |
+| `BEAMPILOT_BSM_INDICATOR` | `1` | The on-screen mirror lamps. `0` keeps the blind spot gating lane changes with nothing shown for it. |
+| `BEAMPILOT_BSM_HOLD_S` | `0.4` | How long a side stays occupied after it stops being reported. Stops a car on the zone boundary strobing the warning — and, with the cancel above, the lane change itself. |
+| `BEAMPILOT_BSM_PORT` | `49154` | `beamngd` → `card`, loopback only. |
+| `BEAMPILOT_BSM_DEBUG` | `0` | Log every state change, in both the BeamNG console and the `beamngd` terminal. |
+
+#### What you see
+
+Stock openpilot has no blind spot display at all — it reads those two `carState` fields but only
+ever *reacts* to them, so a working feed and a broken one look identical from the driver's seat.
+Three things show it now:
+
+| | |
+|---|---|
+| **Mirror lamps** | Amber chevrons at the left and right edge of the road view, pointing outward toward the occupied lane. **Steady** while a car is simply there; **flashing** while you are signalling into it and the change is being refused or cancelled — the same distinction a real door-mirror lamp makes. Nothing is drawn when both sides are clear. |
+| **"Car Detected in Blindspot"** | Stock openpilot's own alert, which fires whenever a lane change is armed against an occupied side. Newly reachable, since nothing used to set the fields it keys on. |
+| **"Lane Change Cancelled / Car Detected in Blindspot"** | Shown for 3 s when a change already under way is aborted. Deliberately distinct from the one above: *blocked* reads as "it never started", but this one **had** started and is now steering back, which is alarming if it happens unannounced. |
+
+> [!NOTE]
+> The alert chime is muted, because `soundd` is in `BLOCK` in `config_beampilot.sh`. The visual
+> alerts and the lamps are unaffected. Remove `soundd` from `BLOCK` if you want the audible
+> prompt as well.
+
+For debugging rather than driving, `tools/beampilot_monitor.py` has a **blind spot** line under
+`carState` and a **lane change** line under `modelV2` showing the raw state machine.
+If it never lights up, the most likely cause is a **stale mod**: BSM arrived after the first
+release, and a mod installed as a *copy* rather than a symlink does not follow `git pull`.
+`tools/beampilot_setup.py` calls that out by name.
+
+> [!NOTE]
+> This is ground truth from the simulator, not perception. It sees vehicles the camera cannot —
+> through walls, in the dark, in fog. That is a deliberate trade: the point is a working lane
+> change gate, not a faithful radar model.
+
+### Ground-truth radar
+
+The car openpilot thinks it is driving, `HONDA_CIVIC_2022`, is **BOSCH_RADARLESS**. opendbc hands
+`radard` an empty `RadarData` at 20 Hz and lead detection falls back entirely on `modelV2` — the
+same camera that, per [No wide-angle camera](#no-wide-angle-camera), is fed wide-lens intrinsics
+for an image that is not wide. How far away the car in front is happens to be exactly what that
+gets wrong.
+
+The simulator knows the answer. The mod already walks `mapmgr` for blind spot monitoring; the
+same pass emits radar points — `dRel` from your front bumper to the target's nearest surface,
+`yRel`, `vRel` — straight to `card.py`, which fills them into the `RadarData` it was already
+publishing. Everything downstream is stock: `radard` fuses them, the longitudinal MPC follows
+them.
+
+| Setting | Default | |
+|---|---|---|
+| `BEAMPILOT_RADAR` | `1` | Master switch. `0` binds no socket and leaves lead detection exactly as it was. |
+| `BEAMPILOT_RADAR_LEADS` | `1` | Let a track become the lead with no confirmation from the camera. See below. |
+| `BEAMPILOT_RADAR_LEAD_HALF_WIDTH_M` | `1.8` | How far off the predicted path a track may sit and still count as in-lane. |
+| `BEAMPILOT_RADAR_RANGE_M` | `150` | About as far as real automotive radar reaches. |
+| `BEAMPILOT_RADAR_HALF_WIDTH_M` | `4.5` | Beam half-width at the bumper... |
+| `BEAMPILOT_RADAR_SPREAD` | `0.12` | ...growing by this much per metre of range. |
+| `BEAMPILOT_RADAR_MAX_TRACKS` | `12` | Nearest first; the rest are dropped. |
+| `BEAMPILOT_RADAR_RATE_HZ` | `20` | `DT_MDL` — `radard` is driven by the model's rate. |
+| `BEAMPILOT_RADAR_PORT` | `49155` | Mod → `card`, loopback only. |
+| `BEAMPILOT_RADAR_DEBUG` | `0` | Log the nearest track to the BeamNG console every scan. |
+
+**About `BEAMPILOT_RADAR_LEADS`.** Stock `radard` will not look at a radar track unless the camera
+already reports a lead with probability over 0.5. That gate is right on a real car — radar
+returns false positives, and braking for one the camera cannot see is how you get phantom
+braking. These points are not from a radar; a track *is* a vehicle. Leaving the gate in place
+would mean ground truth could only ever refine a lead the model already found, which does nothing
+for the case the camera problem actually causes: the model missing a lead entirely.
+
+The risk that buys is picking a car in the *next* lane on a bend, so the in-lane test is measured
+against the model's own predicted path rather than straight ahead. Set it to `0` for stock fusion.
+
+Watch it work on the **lead car** line in `tools/beampilot_monitor.py`, which shows whether the
+lead came from ground truth or from the camera.
 
 ### Vehicles
 
@@ -483,6 +624,43 @@ you can confirm it's about to grab the right thing.
 
 </details>
 
+### Aspect ratio
+
+`beamcamd` resizes whatever rectangle it captures straight to openpilot's **1928×1208**, an aspect
+of **1.5960**. A full-screen 16:9 window is **1.7778**, so the picture arrives squeezed ~11%
+horizontally.
+
+Vertically it is correct — the mod renders a 25.70° **vertical** field, matching openpilot's road
+camera. Horizontally, though, a 16:9 window at that vertical field spans **44.15°** while the
+intrinsics the model applies claim **40.01°**. Everything therefore reads as about 11% closer to
+the centre of the lane than it really is, at every distance, constantly.
+
+This depends only on the *shape* of the window, not its size — 1440p is exactly as affected as
+1080p:
+
+| window | aspect | horizontal field | lateral error |
+|---|---|---|---|
+| 1920×1080 (16:9) | 1.778 | 44.15° | **+11.4%** |
+| 2560×1440 (16:9) | 1.778 | 44.15° | **+11.4%** |
+| 3440×1440 (21:9) | 2.389 | 57.18° | **+49.7%** |
+| 2560×1600 (16:10) | 1.600 | 40.10° | +0.2% |
+| **1928×1208** | 1.596 | 40.01° | **0.0%** |
+
+`BEAMPILOT_CAM_ASPECT=crop` (the default) trims the sides before scaling, leaving exactly the
+40.01° the intrinsics describe. `stretch` is the previous behaviour, kept so the two can be
+compared rather than the change taken on trust. On the portal backend the trim happens inside the
+GStreamer pipeline via `aspectratiocrop`; if that element isn't installed, `beamcamd` says so and
+falls back to `stretch`.
+
+> [!TIP]
+> **Better than either: size the BeamNG window to 1928×1208.** The aspect is then exact, nothing
+> is cropped *and* nothing is resampled — 1:1 pixels into the model. It fits comfortably inside a
+> 1440p screen.
+
+A window *narrower* than 1.596 can't be fixed this way: cropping top and bottom would cut the
+vertical field below 25.70°, trading a horizontal error for a worse vertical one. `beamcamd`
+leaves those alone and tells you how much wider the window needs to be.
+
 ### Wayland
 
 **Wayland is supported**, through `xdg-desktop-portal` and PipeWire. Wayland deliberately forbids
@@ -590,9 +768,11 @@ flowchart TB
 
     GAME ==>|"rendered frames"| SCREEN
     SCREEN ==>|"grab region"| CAM
-    LUA ==>|"<b>UDP 49152</b><br/>speed · steering angle · pos<br/>vel · accel · gyro · gear"| BNG
+    LUA ==>|"<b>UDP 49152</b><br/>speed · steering angle · pos<br/>vel · accel · gyro · gear<br/>blind spot L/R"| BNG
     CAM ==>|"VisionIPC<br/><i>wide + narrow road</i>"| MODELD
     FAKE ==>|"can · accelerometer<br/>gyroscope · gpsLocationExternal<br/>pandaStates"| CARD
+    BNG -->|"<b>UDP 49154</b><br/>blind spot → carState"| CARD
+    LUA ==>|"<b>UDP 49155</b><br/>radar points → radarTracks"| CARD
     CARD -->|"carState"| MODELD
     CTRL ==>|"<b>controlsState</b><br/>desiredCurvature (1/m)"| BNG
     BNG ==>|"<b>UDP 49153</b> JSON<br/>steering −1‥1 · throttle · brake"| LUA
@@ -712,6 +892,39 @@ default and the more direct path. Requires `input` group membership for `/dev/ui
 
 The parts that took the longest to work out, written down so they don't have to be rediscovered.
 `CLAUDE.md` has more.
+
+<details>
+<summary><b>Why blind spot state travels over a socket instead of the fake CAN</b></summary>
+
+Everything else `beamngd` tells openpilot goes in as CAN: it synthesises Honda Bosch frames and
+`card` decodes them into `carState`, exactly as on a real car. Blind spot is the one exception,
+and it is not for want of trying.
+
+The simulated car is a `HONDA_CIVIC_2022`. On a real one, BSM arrives on B-CAN and openpilot
+reads it through a **second DBC** — `honda_crv_ex_2017_body_generated`, with `BSM_STATUS_LEFT`
+and `BSM_STATUS_RIGHT` — enabled by `CP.enableBsm`, which `honda/interface.py` sets by
+fingerprinting message `0x12f8bfa7`. The Civic 2022's DBC dict has no `Bus.body` entry at all,
+so no body parser is ever built and those two messages have nowhere to be decoded.
+
+Adding one means editing `opendbc/car/honda/values.py`. `opendbc` here is a **git submodule**
+pointing at `commaai/opendbc`: any change there cannot be committed to this repo, so anyone
+cloning beampilot would silently not get it, and BSM would work on exactly one machine.
+
+So `beamngd` sends the two flags to `card` over loopback UDP — the same plain-socket pattern the
+mod link already uses — and `card.state_update()` overlays them onto the `CarState` it publishes.
+Five bytes a tick. Downstream nothing knows the difference: `desire_helper.py` and
+`selfdrived.py` see ordinary `carState.leftBlindspot` / `rightBlindspot`.
+
+Two details that matter more than they look:
+
+- **The flags ride in spare `dashLights` bits**, not in new telemetry struct fields.
+  `parse_telemetry()` rejects any packet whose length is not an exact match, so growing the
+  struct would turn "your mod is old, no BSM" into "your mod is old, *no telemetry at all*".
+- **A stale feed fails to "clear", not to "blocked".** If `beamngd` stops sending, the receiver
+  times out after 0.5 s and reports clear. A latched warning would block every lane change for
+  the rest of the drive with nothing on screen to explain why.
+
+</details>
 
 <details>
 <summary><b>The steering chain, step by step</b></summary>
@@ -929,9 +1142,24 @@ already carries.
 
 ### Smaller things
 
-- `carState.vCruise` reports a nonsense set speed while `cruiseState.speed` is correct.
 - `beamcamd` drops ~6% of frames.
-- Driver-monitoring channels publish at 33 Hz where 20 is expected.
+
+**Fixed since this list was written**, kept here because the symptoms are still worth
+recognising:
+
+- *`carState.vCruise` reports a nonsense set speed.* It never did. `vCruise` is in **km/h**;
+  the monitor was multiplying it by 2.237 as if it were m/s, which printed a 30 m/s set speed
+  as "241 mph". A display bug.
+- *Driver-monitoring channels publish at 33 Hz where 20 is expected.* A `now - last > interval`
+  gate quantises to the caller's tick — at `beamngd`'s 100 Hz, a 50 ms gate actually fires every
+  60 ms (16.7 Hz), and the workaround for that was to halve the interval, which overshot to
+  33 Hz. Now a phase accumulator, which measures 20.0 Hz exactly.
+- *Gear, parking brake and steering rate never reached openpilot.* The mod had been sending the
+  first two all along and nothing read them; nothing produced a steering rate at all. openpilot
+  believed the car was permanently in drive, handbrake off, wheel never turning — so
+  `wrongGear`/`reverseGear` could never fire and it would happily engage in reverse.
+- *Roll was hardcoded to zero* in the curvature-to-steering conversion, with a comment saying
+  BeamNG sent no roll. It had been sending it for as long as the comment had been wrong.
 
 ## Safety
 
@@ -993,7 +1221,11 @@ About **1,650 lines across 22 files**.
 
 **Added:** `beamngd` (telemetry, fake sensors, control — 100 Hz) and `beamcamd` (camera — 20 Hz)
 
-Everything else is stock.
+Everything else is stock openpilot, with the exception of a handful of small, env-gated patches
+— `desire_helper.py` (auto lane change), `drive_helpers.py` and `longitudinal_planner.py` (the
+driving limits), `selfdrived.py` (`commIssue`) and `card.py` (the blind spot overlay). Each
+defaults to upstream behaviour when its variable is unset; `grep -rn BEAMPILOT_ openpilot/`
+lists every one.
 
 ## Development
 

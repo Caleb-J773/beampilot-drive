@@ -10,7 +10,7 @@ from openpilot.cereal.visionipc import VisionStreamType
 from openpilot.cereal import messaging
 from msgq.visionipc import VisionIpcServer
 from openpilot.system.camerad.cameras.nv12_info import get_nv12_info
-from openpilot.common.beampilot_env import env_float, env_int
+from openpilot.common.beampilot_env import env_float, env_int, env_str
 from openpilot.selfdrive.beamcamd.window_capture import capture_support, find_window, window_geometry
 
 # Captures the BeamNG.drive window off the X11 desktop (the openpilot_cam BeamNG
@@ -53,6 +53,31 @@ VIPC_BUFFER_COUNT = env_int("BEAMPILOT_VIPC_BUFFERS", 20)
 # data, since real black is Y=16/U=V=128, not zeros.
 CAPTURE_BACKEND = os.environ.get("BEAMPILOT_CAPTURE_BACKEND", "auto").strip().lower()
 
+# What to do when the captured rectangle is not the shape of openpilot's frame.
+#
+# The encoder resizes whatever it grabs straight to 1928x1208, which is an
+# aspect of 1.5960. A full-screen 16:9 window is 1.7778, so the picture gets
+# squeezed horizontally by ~11%. Vertically it is fine -- the mod sets a
+# VERTICAL fov of 25.70 degrees, matching openpilot's road camera -- but the
+# horizontal field then spans 44.15 degrees while the intrinsics the model
+# applies claim 40.01. Everything therefore reads as ~11% closer to the centre
+# of the lane than it is, at every distance, all the time.
+#
+#   crop    (default) trim the sides to 1.5960 before scaling. The remaining
+#           field is exactly 40.01 degrees, which is what the intrinsics say.
+#           Costs the outer ~11% of the view, which was never described by any
+#           calibration anyway.
+#   stretch the previous behaviour: scale the whole rectangle, distortion and
+#           all. Here so the change can be A/B'd rather than taken on trust.
+#
+# Better than either: size the BeamNG window to 1928x1208. Then the aspect is
+# exact, nothing is cropped, and nothing is resampled -- 1:1 pixels into the
+# model. It fits comfortably inside a 1440p screen.
+CAM_ASPECT = env_str("BEAMPILOT_CAM_ASPECT", "crop").strip().lower()
+if CAM_ASPECT not in ("crop", "stretch"):
+  print(f"[beamcamd] BEAMPILOT_CAM_ASPECT {CAM_ASPECT!r} is not 'crop' or 'stretch'; using 'crop'")
+  CAM_ASPECT = "crop"
+
 
 def choose_capture_backend() -> str:
   """Resolve CAPTURE_BACKEND to "x11" or "portal"."""
@@ -64,6 +89,29 @@ def choose_capture_backend() -> str:
     return "x11"
   from openpilot.selfdrive.beamcamd.window_capture import session_type
   return "portal" if session_type() == "wayland" else "x11"
+
+
+def crop_region_to_aspect(region: dict, aspect: float) -> dict:
+  """Centre-crop a capture rectangle to `aspect`, so the resize is uniform.
+
+  Only ever trims the SIDES. A rectangle that is already narrower than the
+  target cannot be fixed this way: cropping top and bottom would cut the
+  vertical field below the 25.70 degrees the mod renders and the intrinsics
+  assume, trading a horizontal error for a worse vertical one. Those are
+  returned untouched, and main() says so once.
+  """
+  width, height = region["width"], region["height"]
+  if height <= 0 or width <= 0:
+    return region
+  target = int(round(height * aspect))
+  if target >= width:
+    return region
+  return {
+    "left": region["left"] + (width - target) // 2,
+    "top": region["top"],
+    "width": target,
+    "height": height,
+  }
 
 
 def clamp_region(region: dict, bounds: dict) -> dict | None:
@@ -361,9 +409,21 @@ def main():
   portal_session = portal_source = None
 
   if backend == "portal":
-    from openpilot.selfdrive.beamcamd.portal_capture import PortalError, open_portal_nv12
+    from openpilot.selfdrive.beamcamd.portal_capture import (PortalError, have_aspectratiocrop,
+                                                             open_portal_nv12)
     try:
-      portal_session, portal_source = open_portal_nv12(W, H)
+      # The compositor hands over a whole window or monitor, so the aspect trim
+      # has to happen inside the GStreamer pipeline rather than in the grab
+      # rectangle. If the element is missing the pipeline would fail to start
+      # at all, so that case degrades to the old stretch rather than no camera.
+      crop_aspect = CAM_ASPECT == "crop"
+      if crop_aspect and not have_aspectratiocrop():
+        crop_aspect = False
+        print("[beamcamd] BEAMPILOT_CAM_ASPECT=crop needs GStreamer's aspectratiocrop element"
+              + " (gst-plugins-good / the videocrop plugin), which is not installed."
+              + " Capturing stretched instead; size the BeamNG window 1928x1208 to avoid"
+              + " needing it at all.", flush=True)
+      portal_session, portal_source = open_portal_nv12(W, H, crop_aspect=crop_aspect)
       print("[beamcamd] capturing via xdg-desktop-portal: PipeWire node"
             + f" {portal_session.node_id}, source {portal_session.stream_size}", flush=True)
     except (PortalError, OSError, ImportError) as e:
@@ -374,9 +434,39 @@ def main():
             + " screen and every frame will come out green.", flush=True)
       backend = "x11"
 
+  # 1928/1208 exactly: 8*241 by 8*151. The GStreamer element the portal path
+  # uses wants it as an integer ratio, so keep the two in step.
+  frame_aspect = W / H
+
+  # Said once, not on every retrack: the window geometry is re-read every couple
+  # of seconds and would otherwise print the same line forever.
+  aspect_reported: set[str] = set()
+
+  def aspect_fix(rect: dict) -> dict:
+    """Apply BEAMPILOT_CAM_ASPECT, saying once what it did or could not do."""
+    if CAM_ASPECT != "crop":
+      return rect
+    cropped = crop_region_to_aspect(rect, frame_aspect)
+    if cropped is rect:
+      if rect["width"] / max(rect["height"], 1) < frame_aspect - 0.005 and "narrow" not in aspect_reported:
+        aspect_reported.add("narrow")
+        need = int(round(rect["height"] * frame_aspect))
+        print(f"[beamcamd] the capture is {rect['width']}x{rect['height']}, narrower than openpilot's"
+              + f" {frame_aspect:.4f} frame; cropping cannot fix that without cutting the vertical"
+              + f" field below 25.70 degrees. Widen the window to {need}px (or size it 1928x1208)"
+              + " to get exact geometry.", flush=True)
+    elif "cropped" not in aspect_reported:
+      aspect_reported.add("cropped")
+      print(f"[beamcamd] aspect: cropping {rect['width']}x{rect['height']} ->"
+            + f" {cropped['width']}x{cropped['height']} so the resize is uniform"
+            + " -- horizontal field is now 40.01 deg, matching the intrinsics openpilot applies."
+            + " Set BEAMPILOT_CAM_ASPECT=stretch for the old behaviour.", flush=True)
+    return cropped
+
   if backend == "x11":
     sct = mss.MSS()
     region, tracked_id = get_capture_region(sct)
+    region = aspect_fix(region)
 
   # Everything that lives for the whole run is allocated by now, so promote it
   # out of the GC's reach and stop collecting. On a soft-realtime loop the cycle
@@ -441,8 +531,9 @@ def main():
           pass
         sct = mss.MSS()
         region, tracked_id = get_capture_region(sct)
+        region = aspect_fix(region)
         need_rediscover = False
-      elif new_region != region:
+      elif (new_region := aspect_fix(new_region)) != region:
         print(f"[beamcamd] window moved/resized -> {new_region['width']}x{new_region['height']}"
               + f" at +{new_region['left']}+{new_region['top']}", flush=True)
         region = new_region

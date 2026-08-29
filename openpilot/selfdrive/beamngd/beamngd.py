@@ -13,11 +13,15 @@ from evdev import ecodes
 
 from opendbc.car.honda.values import CruiseButtons
 from opendbc.car.interfaces import ACCEL_MAX, ACCEL_MIN
-from openpilot.common.beampilot_env import env_float, env_int, env_str
+from openpilot.common.beampilot_env import env_bool, env_float, env_int, env_str
+from openpilot.common.beampilot_bsm import (BSM_ENABLED, BlindSpotSender,
+                                            flags_from_dash_lights, resolve)
+from openpilot.common.beampilot_bsm import lua_config as bsm_lua_config
+from openpilot.common.beampilot_radar import lua_config as radar_lua_config
 from openpilot.common.constants import CV
 from opendbc.car.structs import car
 from opendbc.car.vehicle_model import VehicleModel
-from openpilot.cereal import messaging
+from openpilot.cereal import log, messaging
 from openpilot.common.params import Params
 from openpilot.common.realtime import DT_DMON, Ratekeeper
 from openpilot.tools.sim.lib.common import SimulatorState, vec3
@@ -100,6 +104,58 @@ DL_LEFT_BLINKER  = 1
 DL_RIGHT_BLINKER = 2
 DL_PARKING_BRAKE = 4
 DL_IGNITION_ON   = 8
+# bits 4..7 are the BSM flags; see beampilot_bsm.flags_from_dash_lights. They
+# ride in dashLights rather than in struct fields of their own so that a mod and
+# a beamngd from different revisions still exchange telemetry -- parse_telemetry
+# below rejects any packet whose length is not an exact match, so growing the
+# struct turns "no BSM" into "no telemetry at all".
+
+# The mod cannot read this process's environment, so the BSM tuning has to be
+# pushed down inside the control packet. Re-sent periodically rather than every
+# tick: it is ~200 bytes of JSON, and re-sending is what lets a vehicle reload
+# (which resets the mod to its built-in defaults) pick the settings back up.
+BSM_CONFIG_INTERVAL_TICKS = max(1, int(BEAMNGD_TICK_HZ * 2.0))
+
+# Switch the blinker off once a lane change is done. Nothing in the game
+# cancels an indicator that was never physically stalked -- BeamNG's own
+# auto-cancel keys on the driver steering out of the turn, and openpilot's
+# steering arrives through input.event, not the stalk. openpilot knows exactly
+# when the manoeuvre finished, so it is the one that should say so.
+SIGNAL_AUTO_CANCEL = env_bool("BEAMPILOT_SIGNAL_AUTO_CANCEL", True)
+# A cancel is one-shot, and UDP drops. Repeating it for a few ticks is safe
+# because the mod only ever toggles a signal that is currently on.
+SIGNAL_CANCEL_REPEAT_TICKS = max(1, int(BEAMNGD_TICK_HZ * 0.15))
+
+LaneChangeState = log.LaneChangeState
+LaneChangeDirection = log.LaneChangeDirection
+
+
+class PhaseClock:
+  """Fires at a fixed average rate on a caller that ticks much faster.
+
+  A plain `now - last > interval` gate quantises to the caller's tick: at
+  beamngd's 100Hz a 20Hz (50ms) gate actually fires every 60ms -- 16.7Hz,
+  under what SERVICE_LIST asks for. Halving the interval to compensate (what
+  the driver-monitoring publisher used to do) overshoots the other way, and
+  measured 33Hz against 20 expected. Advancing a phase by exactly one interval
+  per fire keeps the long-run average right whichever way the tick lands.
+  """
+
+  def __init__(self, rate_hz: float):
+    self.interval = 1.0 / rate_hz
+    self.next_at = 0.0
+
+  def due(self, now: float) -> bool:
+    if now < self.next_at:
+      return False
+    # First call, or a gap much longer than the interval (the game was paused,
+    # or the process stalled): resync instead of firing a burst to make up time
+    # that has already gone.
+    if self.next_at == 0.0 or (now - self.next_at) > self.interval:
+      self.next_at = now + self.interval
+    else:
+      self.next_at += self.interval
+    return True
 
 # Cruise-control keys, as single letters. Defaults are i/o/u -- NOT the more
 # obvious c/v/b, which collide with BeamNG.drive's own bindings (c cycles the
@@ -118,6 +174,7 @@ CRUISE_KEYS = (KEY_SET, KEY_RESUME, KEY_CANCEL)  # DECEL_SET, RES_ACCEL, CANCEL
 # Per-tap speed nudge. 1 mph matches a real Honda's SET/RES behavior.
 CRUISE_SPEED_STEP = env_float("BEAMPILOT_CRUISE_STEP_MPH", 1.0) * CV.MPH_TO_MS
 GPS_RATE_HZ = 10.0  # SERVICE_LIST['gpsLocationExternal'].frequency
+PERIPHERAL_RATE_HZ = 4.0  # SERVICE_LIST['peripheralState'].frequency
 
 # The acceleration range the longitudinal planner may actually command, after
 # BEAMPILOT_ACCEL_SCALE/DECEL_SCALE. Kept in sync with longitudinal_planner.py's
@@ -266,7 +323,10 @@ class BeamNGBridge:
     # side.
     self.joystick_controlling = False
 
-    self.sm = messaging.SubMaster(['carControl', 'controlsState', 'selfdriveState'])
+    # vehicleParameters carries the road roll paramsd estimates. modelV2 is
+    # only for the lane change state the signal auto-cancel keys on.
+    self.sm = messaging.SubMaster(['carControl', 'controlsState', 'selfdriveState',
+                                   'vehicleParameters', 'modelV2'])
 
     # Built lazily once CarParams is available. Read from the persistent
     # Params key-value store (written by card.py with block=True, i.e.
@@ -286,9 +346,33 @@ class BeamNGBridge:
     self.params = Params()
     self.vehicle_model: VehicleModel | None = None
 
-    self.last_dmon_update = 0.0
-    self.last_perp_update = 0.0
-    self.last_gps_update = 0.0
+    # Rates SERVICE_LIST expects, held by a phase clock rather than a
+    # `now - last > interval` gate -- see PhaseClock for why that undershoots.
+    self.gps_clock = PhaseClock(GPS_RATE_HZ)
+    self.dmon_clock = PhaseClock(1.0 / DT_DMON)
+    self.perp_clock = PhaseClock(PERIPHERAL_RATE_HZ)
+
+    # steeringRateDeg is not in the telemetry struct, so it is differenced from
+    # the wheel angle here. Lightly filtered: at a 100Hz tick the raw
+    # difference of a ~500 degree-scale angle is mostly quantisation noise.
+    self.last_steering_angle: float | None = None
+    self.last_telemetry_time = 0.0
+
+    # Turn signal auto-cancel. Tracks the lane change state machine's edge out
+    # of laneChangeStarting; see maybe_cancel_signal.
+    self.prev_lane_change_state = LaneChangeState.off
+    self.signal_cancel_side: str | None = None
+    self.signal_cancel_ticks = 0
+
+    # BSM. The mod does the detection (it can see every vehicle in the scene;
+    # we cannot), and this just relays the answer to card.py, which overlays it
+    # onto carState -- see openpilot/common/beampilot_bsm.py for why it takes a
+    # socket rather than a CAN message.
+    self.bsm_sender = BlindSpotSender() if BSM_ENABLED else None
+    self.bsm_flags = 0
+    self.bsm_reported: tuple[bool, bool] | None = None
+    self.last_bsm_print = 0.0
+    self.tick_count = 0
 
   def read_latest_telemetry(self) -> Telemetry | None:
     latest = None
@@ -350,6 +434,33 @@ class BeamNGBridge:
 
     self.state.left_blinker = bool(telemetry.dash_lights & DL_LEFT_BLINKER)
     self.state.right_blinker = bool(telemetry.dash_lights & DL_RIGHT_BLINKER)
+    self.bsm_flags = flags_from_dash_lights(telemetry.dash_lights)
+
+    # The mod has always sent these; nothing was reading them, so openpilot
+    # believed the car was permanently in drive with the handbrake off.
+    # car_events.py raises wrongGear/reverseGear off gearShifter, which is what
+    # keeps openpilot from engaging while the car is rolling backwards.
+    # BeamNG's gearIndex is -1 reverse / 0 neutral / 1+ forward; park is not
+    # distinguishable from neutral without the gear STRING, and both are
+    # non-engageable, so park reports as neutral.
+    if telemetry.gear < 0:
+      self.state.gear = "reverse"
+    elif telemetry.gear == 0:
+      self.state.gear = "neutral"
+    else:
+      self.state.gear = "drive"
+    self.state.parking_brake = bool(telemetry.dash_lights & DL_PARKING_BRAKE)
+
+    now = time.monotonic()
+    dt = now - self.last_telemetry_time
+    if self.last_steering_angle is not None and 1e-4 < dt < 0.5:
+      raw_rate = (telemetry.steering_wheel_deg - self.last_steering_angle) / dt
+      # First-order filter, ~50ms. Enough to take the quantisation edge off
+      # without lagging the signal into uselessness.
+      alpha = min(1.0, dt / 0.05)
+      self.state.steering_rate += alpha * (raw_rate - self.state.steering_rate)
+    self.last_steering_angle = telemetry.steering_wheel_deg
+    self.last_telemetry_time = now
 
     cruise_button = read_cruise_button(self.keyboard_devices)
     self.state.cruise_button = cruise_button
@@ -378,17 +489,38 @@ class BeamNGBridge:
     # gpsLocationExternal 1000Hz vs 10Hz expected (100x over).
     self.sim_sensors.send_imu_message(self.state, count=1)
 
-    if (now - self.last_gps_update) > 1.0 / GPS_RATE_HZ:
+    if self.gps_clock.due(now):
       self.sim_sensors.send_gps_message(self.state, count=1)
-      self.last_gps_update = now
 
-    if (now - self.last_dmon_update) > DT_DMON / 2:
+    if self.dmon_clock.due(now):
       self.sim_sensors.send_fake_driver_monitoring()
-      self.last_dmon_update = now
 
-    if (now - self.last_perp_update) > 0.25:
+    if self.perp_clock.due(now):
       self.sim_sensors.send_peripheral_state()
-      self.last_perp_update = now
+
+  def send_bsm(self):
+    """Relay the mod's blind spot flags to card.py, which owns carState."""
+    if self.bsm_sender is None:
+      return
+    self.bsm_sender.send(self.bsm_flags)
+
+    # Worth saying out loud -- a lane change that quietly refuses to start is
+    # otherwise indistinguishable from a broken one. Rate limited because in
+    # heavy traffic the flags can flip several times a second.
+    reported = resolve(self.bsm_flags)
+    now = time.monotonic()
+    if reported != self.bsm_reported and (now - self.last_bsm_print) > 1.0:
+      left, right = reported
+      if left or right:
+        sides = " and ".join(s for s, on in (("left", left), ("right", right)) if on)
+        print(f"[beamngd] blind spot: {sides} occupied", flush=True)
+      elif self.bsm_reported is not None:
+        print("[beamngd] blind spot: clear", flush=True)
+      self.bsm_reported = reported
+      self.last_bsm_print = now
+
+  def bsm_config_due(self) -> bool:
+    return self.tick_count % BSM_CONFIG_INTERVAL_TICKS == 0
 
   def send_control(self):
     actuators = self.sm['carControl'].actuators
@@ -424,9 +556,15 @@ class BeamNGBridge:
       # a plain angle = curvature * wheelbase * steerRatio formula ignores
       # entirely -- real tires need MORE wheel angle for the same curvature the
       # faster you go. That's very likely why a single flat gain worked at one
-      # speed and not another. roll=0.0: no roll telemetry from BeamNG yet, and
-      # roll_compensation is a minor correction relative to this.
-      target_wheel_angle_rad = self.vehicle_model.get_steer_from_curvature(desired_curvature, self.state.speed, 0.0)
+      # speed and not another.
+      # Roll comes from vehicleParameters, the same estimate openpilot's own
+      # lateral controllers pass to this function (controlsd.py, and every
+      # latcontrol_*.py). The telemetry does carry a true roll from BeamNG, but
+      # its sign convention is motionSim's, not paramsd's, and a roll fed in
+      # backwards is worse than no roll at all -- matching the rest of the
+      # stack is worth more here than the extra accuracy.
+      roll = self.sm['vehicleParameters'].roll
+      target_wheel_angle_rad = self.vehicle_model.get_steer_from_curvature(desired_curvature, self.state.speed, roll)
       target_wheel_angle_deg = math.degrees(target_wheel_angle_rad)
       # NOTE: sign flipped from the expected "openpilot left-positive, negate
       # for BeamNG" convention -- that produced a constant rightward bias in
@@ -467,6 +605,15 @@ class BeamNGBridge:
       elif self.joystick_controlling:
         self.joystick.emit(0.0, 0.0, 0.0)
         self.joystick_controlling = False
+      # Even with the wheel driving, the mod still needs its BSM tuning, and it
+      # can only arrive over the control socket. engaged=false here is the same
+      # thing the mod sees on every not-engaged tick in lua mode, and its
+      # releaseControl() only acts on the edge out of engagement, so this
+      # cannot fight the joystick.
+      payload = {"engaged": False}
+      self.add_mod_config(payload)
+      if len(payload) > 1:
+        self.control_sock.sendto(json.dumps(payload).encode(), (BEAMNG_ADDRESS, CONTROL_PORT))
       return
 
     payload = {
@@ -475,7 +622,53 @@ class BeamNGBridge:
       "throttle": throttle_out,
       "brake": brake_out,
     }
+    self.add_mod_config(payload)
     self.control_sock.sendto(json.dumps(payload).encode(), (BEAMNG_ADDRESS, CONTROL_PORT))
+
+  def add_mod_config(self, payload: dict) -> None:
+    """Attach whatever the mod needs told: tuning, and one-shot commands.
+
+    Tuning goes down periodically rather than every tick -- it is a few hundred
+    bytes of JSON, and re-sending is what lets a vehicle reload (which resets
+    the mod to its own defaults) pick the settings back up on its own.
+    """
+    if self.bsm_config_due():
+      payload["bsm"] = bsm_lua_config()
+      payload["radar"] = radar_lua_config()
+    if self.signal_cancel_ticks > 0:
+      payload["cancelSignal"] = self.signal_cancel_side
+      self.signal_cancel_ticks -= 1
+
+  def maybe_cancel_signal(self):
+    """Switch the blinker off once a lane change has actually finished.
+
+    The completion path and the blind-spot abort path both leave
+    laneChangeStarting for preLaneChange (see desire_helper.py), so the state
+    transition alone cannot tell them apart -- an occupied blind spot on the
+    side being moved into is what distinguishes them. An abort must NOT cancel
+    the signal: leaving it armed is exactly what lets the change resume by
+    itself once the lane clears.
+    """
+    meta = self.sm['modelV2'].meta
+    state, direction = meta.laneChangeState, meta.laneChangeDirection
+    was_changing = self.prev_lane_change_state == LaneChangeState.laneChangeStarting
+    self.prev_lane_change_state = state
+
+    if not (SIGNAL_AUTO_CANCEL and was_changing):
+      return
+    if state not in (LaneChangeState.off, LaneChangeState.preLaneChange):
+      return
+
+    left, right = resolve(self.bsm_flags)
+    aborted = ((left and direction == LaneChangeDirection.left) or
+               (right and direction == LaneChangeDirection.right))
+    if aborted:
+      return
+
+    side = "left" if direction == LaneChangeDirection.left else "right"
+    self.signal_cancel_side = side
+    self.signal_cancel_ticks = SIGNAL_CANCEL_REPEAT_TICKS
+    print(f"[beamngd] lane change finished, cancelling the {side} signal", flush=True)
 
   def tick(self):
     self.sm.update(0)
@@ -486,7 +679,10 @@ class BeamNGBridge:
 
     self.sim_car.update(self.state)
     self.send_sensors()
+    self.send_bsm()
+    self.maybe_cancel_signal()
     self.send_control()
+    self.tick_count += 1
 
 
 def main():

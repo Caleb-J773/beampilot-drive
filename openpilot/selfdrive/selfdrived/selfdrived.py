@@ -18,7 +18,11 @@ from openpilot.common.gps import get_gps_location_service
 
 from openpilot.selfdrive.car.car_events import CarEvents
 from openpilot.selfdrive.locationd.helpers import PoseCalibrator, Pose
-from openpilot.selfdrive.selfdrived.events import Events, ET
+# Priority is aliased: common.realtime already exports a Priority (thread
+# scheduling), and this one is alert ordering. Two very different things.
+from openpilot.selfdrive.selfdrived.events import (Alert, AlertSize, AlertStatus, AudibleAlert,
+                                                   Events, ET, VisualAlert)
+from openpilot.selfdrive.selfdrived.events import Priority as AlertPriority
 from openpilot.selfdrive.selfdrived.helpers import ExcessiveActuationCheck
 from openpilot.selfdrive.selfdrived.state import StateMachine
 from openpilot.selfdrive.selfdrived.alertmanager import AlertManager, set_offroad_alert
@@ -42,6 +46,20 @@ PandaType = log.PandaState.PandaType
 LaneChangeState = log.LaneChangeState
 LaneChangeDirection = log.LaneChangeDirection
 EventName = log.OnroadEvent.EventName
+
+# beampilot: raised when the blind spot cancels a lane change that had already
+# started. Added straight to the AlertManager rather than through EVENTS
+# because EventName lives in opendbc/car/car.capnp -- a git submodule pointing
+# at commaai/opendbc, so a new entry there could not be committed here and
+# nobody cloning this repo would get it. AlertManager keys on alert_type, which
+# is a plain string, so a one-off alert needs no schema change at all.
+LANE_CHANGE_CANCELLED_ALERT = Alert(
+  "Lane Change Cancelled",
+  "Car Detected in Blindspot",
+  AlertStatus.userPrompt, AlertSize.mid,
+  AlertPriority.MID, VisualAlert.none, AudibleAlert.prompt, 3.0)
+LANE_CHANGE_CANCELLED_ALERT.alert_type = "beampilotLaneChangeCancelled/warning"
+LANE_CHANGE_CANCELLED_ALERT.event_type = ET.WARNING
 ButtonType = car.CarState.ButtonEvent.Type
 SafetyModel = car.CarParams.SafetyModel
 AlertLevel = log.DriverMonitoringState.AlertLevel
@@ -128,6 +146,11 @@ class SelfdriveD:
     self.last_functional_fan_frame = 0
     self.events_prev = []
     self.logged_comm_issue = None
+    # beampilot: for spotting the edge where a lane change is cancelled by the
+    # blind spot, which is a different thing to tell the driver than a lane
+    # change that was refused before it started.
+    self.prev_lane_change_state = LaneChangeState.off
+    self.lane_change_cancelled = False
     self.not_running_prev = None
     self.experimental_mode = False
     self.personality = self.params.get("LongitudinalPersonality", return_default=True)
@@ -312,18 +335,31 @@ class SelfdriveD:
     # ******************************************************************************************
 
     # Handle lane change
-    if self.sm['modelV2'].meta.laneChangeState == LaneChangeState.preLaneChange:
-      direction = self.sm['modelV2'].meta.laneChangeDirection
-      if (CS.leftBlindspot and direction == LaneChangeDirection.left) or \
-         (CS.rightBlindspot and direction == LaneChangeDirection.right):
+    lane_change_state = self.sm['modelV2'].meta.laneChangeState
+    direction = self.sm['modelV2'].meta.laneChangeDirection
+    blindspot_blocking = ((CS.leftBlindspot and direction == LaneChangeDirection.left) or
+                          (CS.rightBlindspot and direction == LaneChangeDirection.right))
+
+    # beampilot: desire_helper.py sends a lane change that is already under way
+    # back to preLaneChange when the target lane fills up. A completed change
+    # takes the same path, so the occupied blind spot is what tells them apart.
+    # Worth its own alert: "blocked" reads as "it never started", but this one
+    # started and is now steering back, which is a surprise if unannounced.
+    self.lane_change_cancelled = (self.prev_lane_change_state == LaneChangeState.laneChangeStarting
+                                  and lane_change_state == LaneChangeState.preLaneChange
+                                  and blindspot_blocking)
+    self.prev_lane_change_state = lane_change_state
+
+    if lane_change_state == LaneChangeState.preLaneChange:
+      if blindspot_blocking:
         self.events.add(EventName.laneChangeBlocked)
       else:
         if direction == LaneChangeDirection.left:
           self.events.add(EventName.preLaneChangeLeft)
         else:
           self.events.add(EventName.preLaneChangeRight)
-    elif self.sm['modelV2'].meta.laneChangeState in (LaneChangeState.laneChangeStarting,
-                                                    LaneChangeState.laneChangeFinishing):
+    elif lane_change_state in (LaneChangeState.laneChangeStarting,
+                               LaneChangeState.laneChangeFinishing):
       self.events.add(EventName.laneChange)
 
     for i, pandaState in enumerate(self.sm['pandaStates']):
@@ -544,6 +580,8 @@ class SelfdriveD:
     pers = LONGITUDINAL_PERSONALITY_MAP[self.personality]
     alerts = self.events.create_alerts(self.state_machine.current_alert_types, [self.CP, CS, self.sm, self.is_metric,
                                                                                 self.state_machine.soft_disable_timer, pers])
+    if self.lane_change_cancelled:
+      alerts.append(LANE_CHANGE_CANCELLED_ALERT)
     self.AM.add_many(self.sm.frame, alerts)
     self.AM.process_alerts(self.sm.frame, clear_event_types)
 

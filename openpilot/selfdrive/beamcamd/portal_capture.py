@@ -24,6 +24,7 @@ Two processes' worth of plumbing, kept deliberately dependency-light:
 The portal prompts on first use. `persist_mode=2` plus the returned restore
 token means later runs reuse the same selection without a dialog.
 """
+import math
 import os
 import shutil
 import subprocess
@@ -207,7 +208,7 @@ class PipeWireNV12Source:
   staler -- latency that would show up as the model reacting late.
   """
 
-  def __init__(self, node_id: int, fd: int, width: int, height: int):
+  def __init__(self, node_id: int, fd: int, width: int, height: int, crop_aspect: bool = False):
     if shutil.which("gst-launch-1.0") is None:
       raise PortalError("gst-launch-1.0 not found -- install gstreamer1.0-tools"
                         + " and gstreamer1.0-pipewire (Debian/Ubuntu),"
@@ -219,6 +220,14 @@ class PipeWireNV12Source:
       "gst-launch-1.0", "-q",
       "pipewiresrc", f"fd={fd}", f"path={node_id}", "do-timestamp=true",
       "!", "videoconvert",
+    ]
+    # The X11 path crops the grab rectangle; here the compositor decides what it
+    # hands over, so the trim has to happen in the pipeline. aspectratiocrop
+    # does exactly this -- centre-crop to a ratio -- and goes BEFORE videoscale,
+    # or the squeeze has already happened by the time it runs.
+    if crop_aspect and have_aspectratiocrop():
+      cmd += ["!", "aspectratiocrop", f"aspect-ratio={aspect_ratio_fraction(width, height)}"]
+    cmd += [
       "!", "videoscale",
       "!", f"video/x-raw,format=NV12,width={width},height={height}",
       "!", "fdsink", "fd=1", "sync=false",
@@ -268,6 +277,29 @@ class PipeWireNV12Source:
         pass
 
 
+def aspect_ratio_fraction(width: int, height: int) -> str:
+  """width:height in lowest terms, which is what aspectratiocrop wants."""
+  divisor = math.gcd(width, height)
+  return f"{width // divisor}/{height // divisor}"
+
+
+def have_aspectratiocrop() -> bool:
+  """Is GStreamer's aspectratiocrop element installed?
+
+  It lives in gst-plugins-good (the videocrop plugin), which usually comes with
+  the pipewire plugin but is a separate package on some distributions. Asking
+  first is worth it: a pipeline naming an element that does not exist fails to
+  start at all, which would turn a geometry correction into no camera.
+  """
+  if shutil.which("gst-inspect-1.0") is None:
+    return False
+  try:
+    return subprocess.run(["gst-inspect-1.0", "aspectratiocrop"],
+                          capture_output=True, timeout=10).returncode == 0
+  except (OSError, subprocess.SubprocessError):
+    return False
+
+
 def portal_available() -> bool:
   """Is an xdg-desktop-portal with a ScreenCast interface on the bus?"""
   if shutil.which("dbus-send") is None:
@@ -280,12 +312,12 @@ def portal_available() -> bool:
 
 
 def open_portal_nv12(width: int, height: int, cursor_mode: int = CURSOR_HIDDEN,
-                     use_restore_token: bool = True):
+                     use_restore_token: bool = True, crop_aspect: bool = False):
   """(session, source) ready to hand NV12 frames of exactly width x height."""
   session = PortalScreenCast(cursor_mode=cursor_mode, use_restore_token=use_restore_token)
   node_id, fd = session.start()
   try:
-    source = PipeWireNV12Source(node_id, fd, width, height)
+    source = PipeWireNV12Source(node_id, fd, width, height, crop_aspect=crop_aspect)
   except Exception:
     session.close()
     raise

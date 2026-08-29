@@ -61,6 +61,18 @@ class SimulatorState:
     self.left_blinker = False
     self.right_blinker = False
 
+    # Reported to openpilot as real car state rather than assumed. Defaults
+    # match what was hardcoded before these existed, so a bridge that does not
+    # set them behaves exactly as it used to.
+    # "park" | "reverse" | "neutral" | "drive" -- car_events.py raises
+    # wrongGear/reverseGear on anything but drive, which is what stops
+    # openpilot engaging while the car is rolling backwards.
+    self.gear: str = "drive"
+    self.parking_brake: bool = False
+    # deg/s at the steering wheel. Honda's carstate reads STEER_ANGLE_RATE, and
+    # a bridge that never packs it leaves carState.steeringRateDeg at 0 forever.
+    self.steering_rate: float = 0.0
+
   @property
   def speed(self):
     return math.sqrt(self.velocity.x ** 2 + self.velocity.y ** 2 + self.velocity.z ** 2)
