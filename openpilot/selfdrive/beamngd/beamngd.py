@@ -12,7 +12,9 @@ import evdev
 from evdev import ecodes
 
 from opendbc.car.honda.values import CruiseButtons
+from opendbc.car.interfaces import ACCEL_MAX, ACCEL_MIN
 from openpilot.common.constants import CV
+from openpilot.selfdrive.controls.lib.drive_helpers import env_float
 from opendbc.car.structs import car
 from opendbc.car.vehicle_model import VehicleModel
 from openpilot.cereal import messaging
@@ -93,6 +95,13 @@ DL_IGNITION_ON   = 8
 CRUISE_KEYS = (ecodes.KEY_I, ecodes.KEY_O, ecodes.KEY_U)  # DECEL_SET, RES_ACCEL, CANCEL
 CRUISE_SPEED_STEP = 1.0 * CV.MPH_TO_MS  # matches a real Honda's per-tap SET/RES speed nudge
 GPS_RATE_HZ = 10.0  # SERVICE_LIST['gpsLocationExternal'].frequency
+
+# The acceleration range the longitudinal planner may actually command, after
+# BEAMPILOT_ACCEL_SCALE/DECEL_SCALE. Kept in sync with longitudinal_planner.py's
+# own scaling (imported from opendbc there too) rather than importing that
+# module directly, which would drag the whole longitudinal MPC into beamngd.
+ACCEL_MAX_SCALED = ACCEL_MAX * env_float("BEAMPILOT_ACCEL_SCALE", 1.0)
+ACCEL_MIN_SCALED = ACCEL_MIN * env_float("BEAMPILOT_DECEL_SCALE", 1.0)
 # c/v/b collide with BeamNG.drive's own default bindings (c = cycle camera,
 # among others) -- checked settings/inputmaps/keyboard.json for genuinely
 # unbound plain keys before picking i/o/u.
@@ -411,9 +420,15 @@ class BeamNGBridge:
     delta = max(-STEER_POSITION_RATE_LIMIT_PER_TICK, min(STEER_POSITION_RATE_LIMIT_PER_TICK, delta))
     self.steering_position += delta
     steer_out = self.steering_position
+    # Map openpilot's requested acceleration (m/s^2) onto BeamNG's 0..1 pedals.
+    # Scaled by the SAME limits the longitudinal planner is allowed to command,
+    # so full pedal lines up with the top of that range. These used to be
+    # hardcoded /2.0 and /4.0, matching the stock ACCEL_MAX of 2.0; once
+    # BEAMPILOT_ACCEL_SCALE raised that ceiling, the constants no longer matched
+    # and the pedal saturated partway up the range, leaving the rest flat.
     accel = actuators.accel
-    throttle_out = max(0.0, min(1.0, accel / 2.0))
-    brake_out = max(0.0, min(1.0, -accel / 4.0))
+    throttle_out = max(0.0, min(1.0, accel / ACCEL_MAX_SCALED))
+    brake_out = max(0.0, min(1.0, -accel / abs(ACCEL_MIN_SCALED)))
     steer_out = max(-1.0, min(1.0, steer_out))
 
     # self.state.is_engaged mirrors the simulated *car's* ACC state (see

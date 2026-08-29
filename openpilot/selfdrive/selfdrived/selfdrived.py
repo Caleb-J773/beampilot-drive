@@ -29,6 +29,10 @@ from openpilot.common.hardware import HARDWARE
 REPLAY = "REPLAY" in os.environ
 SIMULATION = "SIMULATION" in os.environ
 TESTING_CLOSET = "TESTING_CLOSET" in os.environ
+# beampilot: stop commIssue/commIssueAvgFreq from blocking engagement and
+# soft-disabling. Opt-in and separate from SIMULATION on purpose -- see the
+# note at the commIssue check for why this one is not merely cosmetic.
+IGNORE_COMM_ISSUE = os.environ.get("BEAMPILOT_IGNORE_COMM_ISSUE") == "1"
 
 LONGITUDINAL_PERSONALITY_MAP = {v: k for k, v in log.LongitudinalPersonality.schema.enumerants.items()}
 
@@ -379,12 +383,21 @@ class SelfdriveD:
     warmup_sec = 5.
     big_model_settling = self.big_model_loading or time.monotonic() < self.big_model_ready_t + warmup_sec
     if not self.sm.all_checks() and no_system_errors and not big_model_settling:  # the load holds modelV2 and friends back on purpose
-      if not self.sm.all_alive():
-        self.events.add(EventName.commIssue)
-      elif not self.sm.all_freq_ok():
-        self.events.add(EventName.commIssueAvgFreq)
-      else:
-        self.events.add(EventName.commIssue)
+      # NOTE: unlike the display-only alerts below, commIssue is NO_ENTRY +
+      # SOFT_DISABLE -- it blocks engagement and disengages mid-drive. It is a
+      # real signal: it fires when a process has stalled or is publishing at the
+      # wrong rate, and the correct fix is almost always to fix the rate (see
+      # SERVICE_LIST and tools/beampilot_monitor.py). Suppressing it means
+      # openpilot keeps driving on stale data if e.g. modeld dies, so it is
+      # deliberately opt-in and NOT bundled into SIMULATION. The log line below
+      # still prints either way, so problems stay visible.
+      if not IGNORE_COMM_ISSUE:
+        if not self.sm.all_alive():
+          self.events.add(EventName.commIssue)
+        elif not self.sm.all_freq_ok():
+          self.events.add(EventName.commIssueAvgFreq)
+        else:
+          self.events.add(EventName.commIssue)
 
       logs = {
         'invalid': [s for s, valid in self.sm.valid.items() if not valid],
@@ -398,9 +411,15 @@ class SelfdriveD:
       self.logged_comm_issue = None
 
     if not self.CP.notCar and not big_model_settling:  # localization has nothing to work with during the load
-      if not self.sm['deviceMotion'].posenetOK:
+      # Both of these are SOFT_DISABLE ("TAKE CONTROL IMMEDIATELY") localization
+      # quality alerts, and both fire routinely against a simulator: posenet is
+      # judging a rendered scene it was never trained on, and locationd's
+      # inputsOK depends on sensor/camera timing a screen-capture pipeline can't
+      # hold as tightly as real hardware. Suppressed under SIMULATION, matching
+      # the guard paramsdTemporaryError already carries just below.
+      if not self.sm['deviceMotion'].posenetOK and (not SIMULATION or REPLAY):
         self.events.add(EventName.posenetInvalid)
-      if not self.sm['deviceMotion'].inputsOK:
+      if not self.sm['deviceMotion'].inputsOK and (not SIMULATION or REPLAY):
         self.events.add(EventName.locationdTemporaryError)
       if (not self.sm['vehicleParameters'].valid and cal_status == log.ExtrinsicsCalibration.Status.calibrated and
           not TESTING_CLOSET and (not SIMULATION or REPLAY)):
@@ -430,7 +449,15 @@ class SelfdriveD:
       undershooting = abs(desired_lateral_accel) / abs(1e-3 + actual_lateral_accel) > 1.2
       turning = abs(desired_lateral_accel) > 1.0
       # TODO: lac.saturated includes speed and other checks, should be pulled out
-      if undershooting and turning and lac.saturated:
+      # NOTE: this one is a real diagnostic, not just noise -- it means openpilot
+      # asked for more curvature than the car actually delivered (undershooting
+      # by >20% while the lateral controller is saturated). Against BeamNG that
+      # usually points at the curvature -> steering-input mapping in beamngd
+      # (Civic steerRatio/wheelbase vs. the spawned vehicle's real geometry, and
+      # MAX_STEERING_WHEEL_ANGLE_DEG), which is worth fixing rather than hiding.
+      # Suppressed under SIMULATION because it repeat-chimes on every turn;
+      # watch controlsState/carState in tools/beampilot_monitor.py instead.
+      if undershooting and turning and lac.saturated and (not SIMULATION or REPLAY):
         self.events.add(EventName.steerSaturated)
 
     # Check for FCW

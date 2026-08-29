@@ -32,6 +32,16 @@ export BEAMPILOT_ACCEL_SCALE="2.0"      # 1.0 = stock (1.6 m/s^2 from a stop)
 export BEAMPILOT_DECEL_SCALE="1.5"      # 1.0 = stock (-1.2 m/s^2 cruise braking)
 # ---------------------------------------------------------------------------
 
+# Stop inter-process communication hiccups from blocking engagement and
+# disengaging mid-drive. Unlike the purely visual alerts, commIssue is a REAL
+# signal -- it means a process stalled or is publishing at the wrong rate, and
+# with this set openpilot will keep driving on stale data (e.g. if modeld dies
+# it steers on the last model output it got). The underlying event is still
+# logged, so check the terminal, and prefer fixing rates over hiding this:
+#   uv run python tools/beampilot_monitor.py
+# Set to 0 to restore stock behavior.
+export BEAMPILOT_IGNORE_COMM_ISSUE="1"
+
 # Commit a lane change from the blinker alone. Stock openpilot also requires a
 # nudge on the steering wheel, which can't happen here -- there's no physical
 # wheel, and beamngd reports user_torque=0 always, so steeringPressed is never

@@ -17,6 +17,7 @@ import time
 
 import openpilot.cereal.messaging as messaging
 from openpilot.cereal.services import SERVICE_LIST
+from openpilot.selfdrive.controls.lib.drive_helpers import MAX_CURVATURE, MAX_LATERAL_ACCEL_NO_ROLL, MIN_SPEED
 
 # Everything our bridge produces, plus the downstream state it drives.
 INPUT_CHANNELS = [
@@ -113,6 +114,22 @@ def main():
         out.append(f"  frameId {md.frameId}   frameDropPerc {md.frameDropPerc:.1f}%")
       else:
         out.append(f"  {RED}no model output{RST}")
+
+      # Is the lateral-accel limit actually BINDING, or is the model asking for
+      # less than the ceiling anyway? clip_curvature() caps curvature at
+      # MAX_LAT_ACCEL/v^2, but that only changes behavior when the model's own
+      # request exceeds it -- otherwise raising the limit does nothing at all.
+      # This is the check that tells you whether the limit is the real
+      # constraint or whether the car runs wide for some other reason.
+      out.append(f"\n{DIM}--- is the turn limit actually binding? ---{RST}")
+      requested = md.action.desiredCurvature
+      v = max(cs.vEgo, MIN_SPEED)
+      cap = min(MAX_LATERAL_ACCEL_NO_ROLL / v**2, MAX_CURVATURE)
+      binding = abs(requested) > cap + 1e-6
+      mark = f"{YEL}BINDING -- raising the limit helps{RST}" if binding else "not binding -- limit is NOT the constraint"
+      out.append(f"  model wants  {requested:+9.5f} 1/m")
+      out.append(f"  cap now      {cap:+9.5f} 1/m  ({1 / cap:6.0f} m radius)  [lat accel {MAX_LATERAL_ACCEL_NO_ROLL} m/s^2]")
+      out.append(f"  after clip   {ctl.desiredCurvature:+9.5f} 1/m  {mark}")
 
       dm, ec = sm['deviceMotion'], sm['extrinsicsCalibration']
       out.append(f"\n{DIM}--- localization / calibration ---{RST}")
