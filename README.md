@@ -181,7 +181,7 @@ uv run python tools/beampilot_tui.py
 <details>
 <summary>What the TUI does</summary>
 
-Groups all 49 settings under Hardware / Car / Driving limits / Controls / Blind spot / Radar /
+Groups all 51 settings under Hardware / Car / Driving limits / Controls / Blind spot / Radar /
 Camera / Alerts / Bridge, with an explanation of each and what the stock openpilot value is.
 Detects your GPUs via `nvidia-smi` and `lspci` and only offers backends this machine has.
 Settings that differ from their default are highlighted; ones with consequences (like
@@ -290,7 +290,23 @@ the reason it won't take a corner.
 | `BEAMPILOT_MAX_CURVATURE` | `0.2` 1/m | Geometric cap. Only binds below ~11 mph. |
 | `BEAMPILOT_ACCEL_SCALE` | `1.0` | Multiplier on the acceleration envelope. |
 | `BEAMPILOT_DECEL_SCALE` | `1.0` | Same, braking. |
+| `BEAMPILOT_ACTUATION_MARGIN` | `2.0` | Headroom the excessive-actuation check keeps above the limits above. |
 | `BEAMPILOT_PERSONALITY` | `1` | Follow distance: `0` aggressive (1.25 s), `1` standard (1.45 s), `2` relaxed (1.75 s). |
+
+> [!IMPORTANT]
+> **Three ceilings, not one.** Until recently the two above were the only ones that moved, which
+> is why raising them did less than it looked like:
+>
+> - `long_mpc` bounded its own solution with opendbc's **unscaled** accel limit, and the planner
+>   takes `min(mpc, cruise)` — so `ACCEL_SCALE` was mostly ignored.
+> - the combined lateral+longitudinal envelope was unscaled, so raising the lateral limit left
+>   **nothing** for the throttle mid-corner. At 20 m/s, 2 m/s² of cornering used the entire budget.
+> - `ExcessiveActuationCheck` soft-disables on **measured** actuation against hardcoded stock trip
+>   points. Past those the car doesn't corner harder — it hands back control mid-corner.
+>
+> All three scale together now (`openpilot/common/beampilot_limits.py`), and the safety net keeps
+> `ACTUATION_MARGIN`× headroom above whatever you allow. Run
+> `uv run python -m openpilot.common.beampilot_limits` to print the active envelope.
 
 <details>
 <summary>What raising these actually does (and doesn't)</summary>

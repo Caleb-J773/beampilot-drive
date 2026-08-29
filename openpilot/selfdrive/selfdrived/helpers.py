@@ -6,8 +6,13 @@ from opendbc.car.structs import car
 from openpilot.common.realtime import DT_CTRL
 from openpilot.selfdrive.locationd.helpers import Pose
 from opendbc.car import ACCELERATION_DUE_TO_GRAVITY
-from opendbc.car.lateral import ISO_LATERAL_ACCEL
-from opendbc.car.interfaces import ACCEL_MIN, ACCEL_MAX
+# beampilot: the trip points scale with what beampilot ALLOWS, not with stock
+# openpilot's limits. Left at stock they are a hard ceiling on the limits rather
+# than a net under them: raise BEAMPILOT_MAX_LAT_ACCEL past 6.0 and the car does
+# not corner harder, it soft-disables mid-corner instead. See
+# common/beampilot_limits.py. Unset environment == stock trip points.
+from openpilot.common.beampilot_limits import (EXCESSIVE_ACCEL, EXCESSIVE_DECEL,
+                                               EXCESSIVE_LATERAL_ACCEL)
 
 MIN_EXCESSIVE_ACTUATION_COUNT = int(0.25 / DT_CTRL)
 MIN_LATERAL_ENGAGE_BUFFER = int(1 / DT_CTRL)
@@ -27,7 +32,8 @@ class ExcessiveActuationCheck:
     # CS.aEgo can be noisy to bumps in the road, transitioning from standstill, losing traction, etc.
     # longitudinal
     accel_calibrated = calibrated_pose.acceleration.x
-    excessive_long_actuation = sm['carControl'].longActive and (accel_calibrated > ACCEL_MAX * 2 or accel_calibrated < ACCEL_MIN * 2)
+    excessive_long_actuation = sm['carControl'].longActive and (accel_calibrated > EXCESSIVE_ACCEL
+                                                                or accel_calibrated < EXCESSIVE_DECEL)
 
     # lateral
     yaw_rate = calibrated_pose.angular_velocity.yaw
@@ -38,7 +44,7 @@ class ExcessiveActuationCheck:
     excessive_lat_actuation = False
     self._engaged_counter = self._engaged_counter + 1 if sm['carControl'].latActive and not CS.steeringPressed else 0
     if self._engaged_counter > MIN_LATERAL_ENGAGE_BUFFER:
-      if abs(roll_compensated_lateral_accel) > ISO_LATERAL_ACCEL * 2:
+      if abs(roll_compensated_lateral_accel) > EXCESSIVE_LATERAL_ACCEL:
         excessive_lat_actuation = True
 
     # deviceMotion acceleration can be noisy due to bad mounting or aliased deviceMotion measurements

@@ -3,7 +3,12 @@ import os
 import time
 import numpy as np
 from openpilot.cereal import log
-from opendbc.car.interfaces import ACCEL_MIN, ACCEL_MAX
+# beampilot: the SCALED pair. Using opendbc's raw ACCEL_MAX here bounded the
+# MPC's own solution at 2.0 m/s^2, and since longitudinal_planner takes
+# min(mpc_target, cruise_target) that bound won whenever it was the lower of
+# the two -- so BEAMPILOT_ACCEL_SCALE raised the planner's clip while the
+# thing producing the number stayed where it was.
+from openpilot.common.beampilot_limits import ACCEL_MAX, ACCEL_MIN
 from openpilot.common.realtime import DT_MDL
 from openpilot.common.swaglog import cloudlog
 # WARNING: imports outside of constants will not trigger a rebuild

@@ -27,6 +27,22 @@ export BEAMPILOT_MAX_LAT_ACCEL="5.0"    # m/s^2
 export BEAMPILOT_MAX_LAT_JERK="8.0"    # m/s^3, how fast it may change curvature
 # export BEAMPILOT_MAX_CURVATURE="0.2"  # 1/m, geometric cap; only binds below ~11mph
 #
+# Raising the two above is not the whole story, and the parts that were missing
+# are why they used to do less than they looked like they did:
+#   - long_mpc bounded its own solution with opendbc's UNSCALED accel limit, and
+#     the planner takes min(mpc, cruise), so ACCEL_SCALE was mostly ignored.
+#   - the combined lateral+longitudinal envelope was unscaled, so raising the
+#     lateral limit left NOTHING for the throttle mid-corner (at 20 m/s, 2 m/s^2
+#     of cornering used the entire budget).
+#   - ExcessiveActuationCheck soft-disables on MEASURED actuation against
+#     hardcoded stock trip points, so past those the car does not corner harder,
+#     it hands back control.
+# All three now scale together; see openpilot/common/beampilot_limits.py.
+#
+# How much headroom the excessive-actuation net keeps above what is allowed.
+# Stock is 2x. Lower it to tighten the net; it can never drop below stock.
+# export BEAMPILOT_ACTUATION_MARGIN="2.0"
+#
 # LONGITUDINAL (accel/braking), as a multiplier on the stock envelope.
 export BEAMPILOT_ACCEL_SCALE="2.0"    # 1.0 = stock (1.6 m/s^2 from a stop)
 export BEAMPILOT_DECEL_SCALE="1.5"    # 1.0 = stock (-1.2 m/s^2 cruise braking)
@@ -353,12 +369,20 @@ unset -f _bp_amd_gpu_index 2>/dev/null || true
 # 3X's screen), BIG=0 at literally 536x240 (comma 4's tiny embedded screen).
 # On a desktop monitor, BIG=0 will look absurdly small. Use SCALE below to
 # actually fine-tune the on-screen size instead.
-export BIG="1"
+export BIG="0"
 
-# fine-tune the actual on-screen window size (application.py's GuiApplication
-# multiplies BIG's base resolution -- 2160x1080 -- by this). On PC, if unset,
-# it auto-picks 1.0 unless your monitor is smaller than the base resolution.
-# uncomment and adjust to taste, e.g. 0.6 for a ~1296x648 window:
+# On-screen window size: a multiplier on the base resolution BIG selects
+# (2160x1080 for BIG=1, 536x240 for BIG=0).
+#
+# Unset, blank, or "auto" fits the window to your SMALLEST monitor, in either
+# direction -- it shrinks BIG=1 so it fits a 1080p screen, and it GROWS BIG=0
+# up from its 536x240 postage stamp. The smallest monitor rather than the
+# current one because the window manager decides where the window opens, and
+# fitting the smallest means it fits wherever that turns out to be.
+#
+# Set a number to override: 0.6 for a ~1296x648 window from BIG=1, or 3.0 to
+# blow BIG=0 up. A value that is not a number falls back to fitting rather
+# than crashing the UI.
 # export SCALE="0.6"
 
 # chestnut class model selection
@@ -376,3 +400,22 @@ export CHESTNUT="0"
 # --- added by tools/beampilot_tui.py ---
 export BEAMPILOT_CONTROL_MODE="lua"
 export BEAMPILOT_CAM_MONITOR="1"
+
+# --- added by tools/beampilot_tui.py ---
+export BEAMPILOT_GPU_INDEX="0"
+export SCALE="0.7"
+export BEAMPILOT_MAX_CURVATURE="0.2"
+export BEAMPILOT_LANE_CHANGE_ABORT_S="2.0"
+export BEAMPILOT_BSM_WIDTH_M="3.6"
+export BEAMPILOT_BSM_REAR_M="4.0"
+export BEAMPILOT_BSM_DEBUG="0"
+export BEAMPILOT_RADAR_LEAD_HALF_WIDTH_M="1.8"
+export BEAMPILOT_RADAR_RANGE_M="150"
+export BEAMPILOT_RADAR_HALF_WIDTH_M="4.5"
+export BEAMPILOT_RADAR_MAX_TRACKS="12"
+export BEAMPILOT_RADAR_DEBUG="0"
+export BEAMPILOT_TICK_HZ="100"
+export BEAMPILOT_TELEMETRY_PORT="49152"
+export BEAMPILOT_CONTROL_PORT="49153"
+export BEAMPILOT_BEAMNG_ADDRESS="127.0.0.1"
+export BEAMPILOT_LAUNCH_DELAY="0"

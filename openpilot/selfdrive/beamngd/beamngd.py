@@ -12,7 +12,8 @@ import evdev
 from evdev import ecodes
 
 from opendbc.car.honda.values import CruiseButtons
-from opendbc.car.interfaces import ACCEL_MAX, ACCEL_MIN
+from openpilot.common.beampilot_limits import ACCEL_MAX as ACCEL_MAX_SCALED
+from openpilot.common.beampilot_limits import ACCEL_MIN as ACCEL_MIN_SCALED
 from openpilot.common.beampilot_env import env_bool, env_float, env_int, env_str
 from openpilot.common.beampilot_bsm import (BSM_ENABLED, BlindSpotSender,
                                             flags_from_dash_lights, resolve)
@@ -176,12 +177,9 @@ CRUISE_SPEED_STEP = env_float("BEAMPILOT_CRUISE_STEP_MPH", 1.0) * CV.MPH_TO_MS
 GPS_RATE_HZ = 10.0  # SERVICE_LIST['gpsLocationExternal'].frequency
 PERIPHERAL_RATE_HZ = 4.0  # SERVICE_LIST['peripheralState'].frequency
 
-# The acceleration range the longitudinal planner may actually command, after
-# BEAMPILOT_ACCEL_SCALE/DECEL_SCALE. Kept in sync with longitudinal_planner.py's
-# own scaling (imported from opendbc there too) rather than importing that
-# module directly, which would drag the whole longitudinal MPC into beamngd.
-ACCEL_MAX_SCALED = ACCEL_MAX * env_float("BEAMPILOT_ACCEL_SCALE", 1.0)
-ACCEL_MIN_SCALED = ACCEL_MIN * env_float("BEAMPILOT_DECEL_SCALE", 1.0)
+# The acceleration range the longitudinal planner may actually command. Shared
+# with the planner and the MPC through common/beampilot_limits.py -- three
+# copies of the same env arithmetic is how they drifted apart in the first place.
 # c/v/b collide with BeamNG.drive's own default bindings (c = cycle camera,
 # among others) -- checked settings/inputmaps/keyboard.json for genuinely
 # unbound plain keys before picking i/o/u.

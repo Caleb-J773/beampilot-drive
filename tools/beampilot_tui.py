@@ -114,7 +114,9 @@ def build_sections() -> list[Section]:
               "1 = comma 3/3X window (2160x1080). 0 = comma 4 (536x240) -- tiny on a desktop.",
               "1", choices=["1", "0"]),
       Setting("SCALE", "Window scale",
-              "Multiplies the window size. 0.6 gives roughly 1296x648. Blank = automatic.",
+              "Multiplies the base size BIG selects. Blank fits the window to your smallest monitor in"
+              + " EITHER direction -- it shrinks BIG=1 to fit a 1080p screen and grows BIG=0 up from its"
+              + " 536x240 postage stamp. Set a number to override.",
               "", numeric=True, step=0.1),
     ]),
     Section("Car", "The car openpilot believes it is driving.", [
@@ -149,6 +151,12 @@ def build_sections() -> list[Section]:
       Setting("BEAMPILOT_STEER_SWEEP_SECONDS", "Steering response (s)",
               "Lock-to-lock sweep time. Lower is snappier but twitchier.",
               "0.15", numeric=True, step=0.05),
+      Setting("BEAMPILOT_ACTUATION_MARGIN", "Actuation headroom",
+              "How much room the excessive-actuation check keeps above what the limits above allow."
+              + " It soft-disables on MEASURED actuation, so left at stock it becomes a ceiling on the"
+              + " limits rather than a net under them -- raise the lateral limit past it and the car"
+              + " hands back control mid-corner instead of cornering harder. Never drops below stock.",
+              "2.0", numeric=True, step=0.25),
       Setting("BEAMPILOT_MAX_CURVATURE", "Max curvature (1/m)",
               "Hard geometric cap on turn tightness. Only binds below ~11mph; 0.2 = a 5m radius.",
               "0.2", numeric=True, step=0.05),

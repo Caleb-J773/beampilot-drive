@@ -35,7 +35,14 @@ ENABLE_VSYNC = os.getenv("ENABLE_VSYNC", "0") == "1"
 SHOW_FPS = os.getenv("SHOW_FPS") == "1"
 SHOW_TOUCHES = os.getenv("SHOW_TOUCHES") == "1"
 STRICT_MODE = os.getenv("STRICT_MODE") == "1"
-SCALE = float(os.getenv("SCALE", "1.0"))
+# beampilot: SCALE is parsed lazily and defensively (see _resolve_scale). It
+# used to be float(os.getenv("SCALE", "1.0")) at import, which turns an empty
+# `export SCALE=""` -- easy to write by hand -- into a ValueError traceback at
+# module import, before anything has had a chance to say what is wrong.
+SCALE_RAW = os.getenv("SCALE")
+# Headroom left when fitting the UI to the screen, for the title bar, the panel
+# and whatever else the desktop puts in the way.
+UI_FIT_HEADROOM = 0.92
 GRID_SIZE = int(os.getenv("GRID", "0"))
 PROFILE_RENDER = int(os.getenv("PROFILE_RENDER", "0"))
 PROFILE_STATS = int(os.getenv("PROFILE_STATS", "100"))  # Number of functions to show in profile output
@@ -210,10 +217,7 @@ class GuiApplication:
     self._width = width if width is not None else GuiApplication._default_width()
     self._height = height if height is not None else GuiApplication._default_height()
 
-    if PC and os.getenv("SCALE") is None:
-      self._scale = self._calculate_auto_scale()
-    else:
-      self._scale = SCALE
+    self._scale = self._resolve_scale()
 
     # Scale, then ensure dimensions are even
     self._scaled_width = int(self._width * self._scale)
@@ -877,17 +881,64 @@ class GuiApplication:
     print(f"{green}Average frame time: {avg_frame_time:.2f} ms ({1000/avg_frame_time:.1f} FPS){reset}")
     sys.exit(0)
 
+  def _resolve_scale(self) -> float:
+    """How much to shrink the UI by. A number, or fitted to the screen.
+
+    SCALE unset, blank, or "auto"/"fit" fits the window to the monitor it will
+    open on. Anything else is taken as a multiplier -- 0.7 for 70% -- and a
+    value that is not a number falls back to fitting rather than crashing.
+    """
+    raw = (SCALE_RAW or "").strip().lower()
+    if raw and raw not in ("auto", "fit"):
+      try:
+        return float(raw)
+      except ValueError:
+        print(f"[ui] SCALE={SCALE_RAW!r} is not a number; fitting to the screen instead")
+    if not PC:
+      return 1.0
+    return self._calculate_auto_scale()
+
   def _calculate_auto_scale(self) -> float:
-     # Create temporary window to query monitor info
+    """Shrink BIG down until it fits on the screen it will actually open on.
+
+    Fits in BOTH directions, which is the part that was missing. Three separate
+    ways the old version got a desktop wrong:
+
+      * it measured monitor 0, but the window does not necessarily open there.
+        With a 2560x1440 primary and a 1920x1080 secondary, raylib reports
+        current monitor 1 -- so a 2160-wide window was opened on a 1920-wide
+        screen and hung off the edge.
+      * "nominally big enough" ignored the title bar and the panel, so
+        2160x1080 on a 1080p screen fit exactly, and then did not.
+      * it could only ever shrink. BIG=0 is a 536x240 base -- the comma 4's
+        actual screen -- which on a desktop monitor is a postage stamp, and
+        there was no way to grow it. SCALE only went one way.
+    """
+    # The SMALLEST monitor, not the current one. get_current_monitor() on the
+    # 1x1 probe window reports wherever the window manager happened to put it,
+    # which is not necessarily where the real window opens -- on this desk it
+    # alternates between a 1440p and a 1080p screen from run to run, and half
+    # the time that produced a window too wide for the display it landed on.
+    # Fitting the smallest means it fits wherever it ends up.
     rl.init_window(1, 1, "")
-    w, h = rl.get_monitor_width(0), rl.get_monitor_height(0)
+    monitors = [(rl.get_monitor_width(i), rl.get_monitor_height(i))
+                for i in range(max(1, rl.get_monitor_count()))]
     rl.close_window()
 
-    if w == 0 or h == 0 or (w >= self._width and h >= self._height):
+    usable = [(w, h) for w, h in monitors if w > 0 and h > 0]
+    if not usable:
       return 1.0
+    w = min(mw for mw, _ in usable)
+    h = min(mh for _, mh in usable)
 
-    # Apply 0.95 factor for window decorations/taskbar margin
-    return max(0.3, min(w / self._width, h / self._height) * 0.95)
+    # Whichever direction it takes, and always with the headroom.
+    scale = max(0.3, min(w / self._width, h / self._height) * UI_FIT_HEADROOM)
+    if abs(scale - 1.0) > 0.01:
+      verb = "shrinking" if scale < 1.0 else "growing"
+      print(f"[ui] {verb} {self._width}x{self._height} to fit the {w}x{h} screen:"
+            + f" scale {scale:.2f} -> {int(self._width * scale)}x{int(self._height * scale)}."
+            + " Set SCALE to a number to override.")
+    return scale
 
   @staticmethod
   def _default_width() -> int:

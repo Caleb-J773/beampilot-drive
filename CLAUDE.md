@@ -65,6 +65,7 @@ CAN only flows **into** openpilot (fake sensors), never back into the game.
 | `openpilot/selfdrive/beamcamd/portal_capture.py` | Wayland capture: xdg-desktop-portal ScreenCast + PipeWire |
 | `tools/beamng_mod/beampilot_bridge/lua/vehicle/protocols/beampilot.lua` | the BeamNG mod: telemetry out, control in |
 | `tools/beamng_mod/openpilot_cam/lua/ge/.../openpilot.lua` | rigid, FOV-matched camera (25.70° vertical). **Required** — `beampilot.lua` selects it by name at spawn |
+| `openpilot/common/beampilot_limits.py` | how hard the car may be driven: accel/lateral limits, the combined envelope, and the excessive-actuation trip points, all scaling together |
 | `openpilot/common/beampilot_bsm.py` | BSM wire format + the `beamngd`→`card` socket, and the tuning pushed down to the mod |
 | `openpilot/common/beampilot_radar.py` | radar wire format + the `mod`→`card` socket (one hop; no relay) |
 | `openpilot/selfdrive/beamngd/test_bsm.py` | BSM unit tests (`uv run python ...`) |
@@ -189,6 +190,17 @@ These were each a real bug that cost significant debugging time. Don't regress t
   struct turns "old mod, no BSM" into "old mod, no telemetry at all".
 - **A stale BSM feed must fail to *clear*, not to *blocked*.** A latched warning blocks every
   lane change for the rest of the drive with nothing on screen to explain it. 0.5s timeout.
+- **Raising a driving limit means raising THREE things.** `long_mpc.py` bounded its solution with
+  opendbc's unscaled `ACCEL_MAX` and the planner takes `min(mpc, cruise)`, so the scale was
+  mostly ignored; `_A_TOTAL_MAX_V` (the combined lat+long envelope) was unscaled, so raising the
+  lateral limit left nothing for the throttle mid-corner; and `ExcessiveActuationCheck`
+  soft-disables on MEASURED actuation against stock trip points, so past those you get a
+  disengagement rather than performance. All in `common/beampilot_limits.py` now.
+- **`get_current_monitor()` on a probe window is not deterministic.** The UI's auto-scale opened
+  a 1x1 window to ask which screen it was on; with two monitors that answer changed between
+  runs, and half the time it sized the window for the wrong one. Fit the SMALLEST monitor.
+  Auto-scale also has to work in BOTH directions -- BIG=0 is a 536x240 base, which needs
+  growing, not shrinking.
 - **The capture rectangle's ASPECT has to be 1928/1208 (1.5960), not just any rectangle.**
   `FrameEncoder.encode` resizes straight to the frame size with no aspect preservation, so a 16:9
   window is squeezed ~11% horizontally: vertically right (the mod renders 25.70 deg VERTICAL) but

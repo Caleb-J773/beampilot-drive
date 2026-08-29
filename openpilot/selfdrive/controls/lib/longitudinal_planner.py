@@ -3,7 +3,10 @@ import math
 import numpy as np
 
 import openpilot.cereal.messaging as messaging
-from opendbc.car.interfaces import ACCEL_MIN, ACCEL_MAX
+# ACCEL_MIN/ACCEL_MAX come from beampilot_limits rather than straight from
+# opendbc: they are the SCALED pair, and long_mpc.py has to agree with them or
+# the MPC's own bound silently wins.
+from openpilot.common.beampilot_limits import A_TOTAL_MAX_SCALE, ACCEL_MAX, ACCEL_MIN
 from openpilot.common.constants import CV
 from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.common.realtime import DT_MDL
@@ -11,7 +14,8 @@ from openpilot.selfdrive.modeld.constants import ModelConstants
 from openpilot.selfdrive.controls.lib.longcontrol import LongCtrlState
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import LongitudinalMpc, LongitudinalPlanSource
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import T_IDXS as T_IDXS_MPC
-from openpilot.selfdrive.controls.lib.drive_helpers import CONTROL_N, env_float, get_accel_from_plan, should_stop
+from openpilot.common.beampilot_env import env_float
+from openpilot.selfdrive.controls.lib.drive_helpers import CONTROL_N, get_accel_from_plan, should_stop
 from openpilot.selfdrive.car.cruise import V_CRUISE_MAX, V_CRUISE_UNSET
 from openpilot.common.swaglog import cloudlog
 
@@ -28,14 +32,17 @@ A_CRUISE_MAX_VALS = [v * _ACCEL_SCALE for v in (1.6, 1.2, 0.8, 0.6)]
 A_CRUISE_MAX_BP = [0., 10.0, 25., 40.]
 J_CRUISE_VALS = [v * _ACCEL_SCALE for v in (1.6, 1.2, 0.8, 0.6)]
 A_CRUISE_MIN = -1.2 * _DECEL_SCALE
-ACCEL_MAX = ACCEL_MAX * _ACCEL_SCALE
-ACCEL_MIN = ACCEL_MIN * _DECEL_SCALE
 CONTROL_N_T_IDX = ModelConstants.T_IDXS[:CONTROL_N]
 ALLOW_THROTTLE_THRESHOLD = 0.4
 MIN_ALLOW_THROTTLE_SPEED = 2.5
 
 # Lookup table for turns
-_A_TOTAL_MAX_V = [1.7, 3.2]
+# The combined lateral+longitudinal envelope: a_x_allowed = sqrt(total^2 - a_y^2).
+# beampilot scales it, because grip is shared -- leave it at stock while raising
+# the lateral limit and the car cannot accelerate THROUGH a corner. At 20 m/s the
+# stock envelope is 1.7, so 2 m/s^2 of cornering leaves nothing at all for the
+# throttle.
+_A_TOTAL_MAX_V = [1.7 * A_TOTAL_MAX_SCALE, 3.2 * A_TOTAL_MAX_SCALE]
 _A_TOTAL_MAX_BP = [20., 40.]
 
 def get_max_accel(v_ego):

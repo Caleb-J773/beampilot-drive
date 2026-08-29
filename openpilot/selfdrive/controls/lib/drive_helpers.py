@@ -1,26 +1,19 @@
 import numpy as np
-from openpilot.common.beampilot_env import env_float
 from openpilot.common.constants import ACCELERATION_DUE_TO_GRAVITY
 from openpilot.common.realtime import DT_CTRL, DT_MDL
 
-# beampilot: the limits below are tuned for a real car carrying real passengers,
-# following EU/ISO comfort guidelines. In a simulator they're often the binding
-# constraint on whether openpilot can follow a road at all --
-# MAX_LATERAL_ACCEL_NO_ROLL of 3.0 m/s^2 caps curvature at 3.0/v^2, a ~300m turn
-# radius at 67mph, so anything tighter is clipped and the car runs wide.
-# Each default is the stock upstream value, so an unset environment behaves as
-# unmodified openpilot.
+# beampilot: the turning limits now live in common/beampilot_limits.py, with
+# everything else that decides how hard the car may be driven -- the point being
+# that clip_curvature below is not the only thing enforcing them, and the others
+# have to move together. Re-exported here under their upstream names so callers
+# and upstream diffs are unaffected.
+from openpilot.common.beampilot_limits import (MAX_CURVATURE, MAX_LATERAL_ACCEL_NO_ROLL,
+                                                MAX_LATERAL_JERK)
 
 MIN_SPEED = 1.0
 CONTROL_N = 17
 CAR_ROTATION_RADIUS = 0.0
-# This is a turn radius smaller than most cars can achieve
-MAX_CURVATURE = env_float("BEAMPILOT_MAX_CURVATURE", 0.2)
 MIN_STABLE_DELAY = 0.3
-
-# EU guidelines
-MAX_LATERAL_JERK = env_float("BEAMPILOT_MAX_LAT_JERK", 5.0)  # m/s^3
-MAX_LATERAL_ACCEL_NO_ROLL = env_float("BEAMPILOT_MAX_LAT_ACCEL", 3.0)  # m/s^2
 
 
 def should_stop(v_ego: float, a_target: float) -> bool:
