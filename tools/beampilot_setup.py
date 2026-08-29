@@ -13,6 +13,7 @@ Read-only until you explicitly choose to install the mod or run the build.
 import os
 import re
 import shutil
+import time
 import subprocess
 import sys
 
@@ -473,6 +474,16 @@ def check_beamng():
       for feature, marker in MOD_FEATURES.get(name, {}).items():
         if not _mod_has(mod, marker):
           print(f"      {WARN} this copy predates {feature}; re-install to get it")
+      if os.path.isdir(mod) and os.path.islink(os.path.join(mod, name)):
+        # The `ln -sfn` trap: pointed at a real directory it creates the link
+        # INSIDE it rather than replacing it, leaving a mod nested in a mod.
+        print(f"      {WARN} and it contains a stray {name}/{name} symlink"
+              + " -- a mod nested inside a mod, which BeamNG will also try to load")
+      # Offered for reinstall, not just reported. A copy that merely LOOKS
+      # current is the worst state to leave someone in: it works until the day
+      # the mod changes, and then fails as a missing feature rather than an
+      # error.
+      missing.append(name)
     else:
       print(f"  {INFO} {name} not installed yet")
       missing.append(name)
@@ -498,7 +509,12 @@ def install_mods(userdir, names):
         if os.path.islink(mod) or os.path.isfile(mod):
           os.unlink(mod)
         else:
-          shutil.rmtree(mod)
+          # Moved aside rather than deleted: it is the user's game folder, and
+          # a copy may hold edits they made in place before learning it was not
+          # the repo.
+          backup = f"{mod}.replaced-{time.strftime('%Y%m%d-%H%M%S')}"
+          shutil.move(mod, backup)
+          print(f"      {DIM}old copy moved to {os.path.basename(backup)}{RESET}")
       os.symlink(src, mod)
       print(f"  {OK} linked {name} -> {src}")
     except OSError as e:

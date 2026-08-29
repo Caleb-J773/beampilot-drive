@@ -25,8 +25,22 @@ if [ -d "$BEAMNG_USERDIR" ]; then
   # Without openpilot_cam that call silently does nothing and beamcamd ends up
   # capturing whatever camera the player last used.
   for mod in beampilot_bridge openpilot_cam; do
-    ln -sfn "$DIR/tools/beamng_mod/$mod" "$MODS_DIR/$mod"
-    echo "  $mod -> $MODS_DIR/$mod"
+    src="$DIR/tools/beamng_mod/$mod"
+    dst="$MODS_DIR/$mod"
+    # `ln -sfn SRC DIR` does NOT replace a real directory -- it creates
+    # DIR/basename(SRC) inside it. (-n only helps when DIR is already a symlink
+    # to a directory.) So a mod that was ever COPIED here silently stays a copy,
+    # with a stray nested symlink inside it, and never follows a git pull again.
+    # The symptom is a feature that is simply never there: no error, no log.
+    if [ -L "$dst" ]; then
+      :                       # already a link; ln -sfn replaces it correctly
+    elif [ -e "$dst" ]; then
+      backup="$dst.replaced-$(date +%Y%m%d-%H%M%S)"
+      mv "$dst" "$backup"
+      echo "  $mod was a copy, not a link -- moved to $(basename "$backup")"
+    fi
+    ln -sfn "$src" "$dst"
+    echo "  $mod -> $dst"
   done
   echo "mods symlinked (edits in the repo apply live; reload with Ctrl+L in-game)"
 else
