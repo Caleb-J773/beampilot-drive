@@ -183,6 +183,29 @@ def check_display():
     print(f"  {WARN} xdotool missing -- window tracking unavailable, falling back to monitor capture")
     print(f"      {DIM}install it for per-window capture:{RESET}")
     print(f"      {DIM}  apt install xdotool   |   pacman -S xdotool   |   dnf install xdotool{RESET}")
+
+  if session == "wayland":
+    # Detection and capture are both X11-only. Under Wayland that is fine as
+    # long as BeamNG is an XWayland client (the normal case for Proton/Wine),
+    # so say plainly what has to be true rather than just flagging "wayland".
+    try:
+      from openpilot.selfdrive.beamcamd.window_capture import have_kwin
+      kwin = have_kwin()
+    except ImportError:
+      kwin = False
+    if os.environ.get("DISPLAY"):
+      print(f"  {OK} XWayland present (DISPLAY={os.environ['DISPLAY']})"
+            + " -- BeamNG should be visible to both tracking and capture")
+    else:
+      print(f"  {FAIL} DISPLAY is unset, so there is no XWayland server")
+      print(f"      {DIM}BeamNG runs as an X11 client; without XWayland it cannot be"
+            + f" found or captured.{RESET}")
+    if kwin:
+      print(f"  {INFO} KWin detected -- if no window is found, setup can ask the compositor")
+      print(f"      {DIM}whether BeamNG is a native Wayland window (which X11 capture"
+            + f" cannot read).{RESET}")
+    print(f"      {DIM}Full report any time:"
+          + f" python -m openpilot.selfdrive.beamcamd.window_capture{RESET}")
   return usable
 
 
@@ -199,21 +222,90 @@ def _wrap(text, width):
   return out
 
 
+def amd_gfx_targets():
+  """[(tinygrad index, gfx_target_version)] for each KFD GPU node.
+
+  Mirrors ops_amd.py's own enumeration: only nodes with a nonzero gpu_id count,
+  in numeric node order, so the index matches what DEV=":N+AMD" selects.
+  """
+  topo = "/sys/devices/virtual/kfd/kfd/topology/nodes"
+  out = []
+  try:
+    nodes = sorted(os.listdir(topo), key=lambda n: int(n) if n.isdigit() else 1 << 30)
+  except OSError:
+    return out
+  idx = -1
+  for node in nodes:
+    try:
+      with open(os.path.join(topo, node, "gpu_id")) as fh:
+        if fh.read().strip() in ("", "0"):
+          continue
+      idx += 1
+      with open(os.path.join(topo, node, "properties")) as fh:
+        for line in fh:
+          if line.startswith("gfx_target_version"):
+            out.append((idx, int(line.split()[1])))
+            break
+    except (OSError, ValueError):
+      continue
+  return out
+
+
 def check_gpu():
   hr("GPU")
   found = False
-  rc, out, _ = run(["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader"])
+  usable_nv = None
+
+  # tinygrad's NV backend is not CUDA -- it only implements Ampere and newer
+  # command classes, so an older card is not "slower", it cannot run the model
+  # at all (modeld dies with a bare StopIteration in ops_nv.py). On a mixed-GPU
+  # machine tinygrad defaults to index 0, which may well be the unusable one,
+  # so show per-card capability and which index will actually be picked.
+  rc, out, _ = run(["nvidia-smi", "--query-gpu=index,name,memory.total,compute_cap",
+                    "--format=csv,noheader"])
   if rc == 0 and out:
-    for line in out.splitlines():
-      print(f"  {OK} NVIDIA: {line.strip()}")
-    print(f"      {DIM}set USE_NV=1{RESET}")
     found = True
+    for line in out.splitlines():
+      parts = [p.strip() for p in line.split(",")]
+      if len(parts) < 4:
+        print(f"  {OK} NVIDIA: {line.strip()}")
+        continue
+      idx, name, mem, cap = parts[0], parts[1], parts[2], parts[3]
+      try:
+        ok_cap = float(cap) >= 8.0
+      except ValueError:
+        ok_cap = False
+      if ok_cap:
+        if usable_nv is None:
+          usable_nv = idx
+        print(f"  {OK} NVIDIA {idx}: {name}, {mem} (compute {cap})")
+      else:
+        print(f"  {WARN} NVIDIA {idx}: {name}, {mem} (compute {cap})"
+              + " -- too old for tinygrad, needs >= 8.0 (Ampere)")
+    if usable_nv is not None:
+      print(f"      {DIM}set USE_NV=1; config_beampilot.sh will select GPU {usable_nv}"
+            + f" via DEV=\":{usable_nv}+NV\"{RESET}")
+    else:
+      print(f"  {FAIL} no NVIDIA GPU is new enough for tinygrad's NV backend")
+
   rc, out, _ = run(["lspci"])
   if rc == 0:
     for line in out.splitlines():
       if re.search(r"VGA.*\b(AMD|ATI|Radeon)\b", line, re.I):
         print(f"  {OK} AMD: {line.split(':', 2)[-1].strip()[:60]}")
         found = True
+
+  # Same story for AMD: gfx942, gfx950 and gfx11xx/gfx12xx only.
+  for idx, ver in amd_gfx_targets():
+    target = (ver // 10000, (ver // 100) % 100, ver % 100)
+    arch = f"gfx{target[0]}{target[1]:x}{target[2]:x}"
+    if target in ((9, 4, 2), (9, 5, 0)) or target[0] in (11, 12):
+      print(f"      {DIM}AMD {idx}: {arch} -- usable with USE_AMD=1"
+            + f" (DEV=\":{idx}+AMD\"){RESET}")
+    else:
+      print(f"  {WARN} AMD {idx}: {arch} -- tinygrad's AMD backend does not support it"
+            + " (needs gfx942, gfx950 or gfx11xx/gfx12xx)")
+
   if not found:
     print(f"  {WARN} no discrete GPU detected -- the driving model will be very slow on CPU")
     return False
@@ -383,13 +475,19 @@ def detect_window():
   hr("Capture target")
   sys.path.insert(0, REPO)
   try:
-    from openpilot.selfdrive.beamcamd.window_capture import candidates
+    from openpilot.selfdrive.beamcamd.window_capture import candidates, explain_not_found
   except ImportError:
     print(f"  {WARN} window_capture unavailable")
     return
   found = candidates()
   if not found:
     print(f"  {INFO} no BeamNG window found right now.")
+    # "no window found" is the single most-reported problem and has several
+    # very different causes (game not running, xdotool missing, no DISPLAY, or
+    # a native Wayland surface that X11 simply cannot see). Ask for the real
+    # reason instead of printing the same guess every time.
+    for line in _wrap(explain_not_found(), 72):
+      print(f"      {DIM}{line}{RESET}")
     print(f"      {DIM}Start the game and spawn a vehicle, then re-run to pick a window.{RESET}")
     print(f"      {DIM}Without one, beamcamd captures a whole monitor (BEAMPILOT_CAM_MONITOR).{RESET}")
     return
