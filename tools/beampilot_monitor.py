@@ -38,6 +38,8 @@ STATE_CHANNELS = [
 ALL = [c for c in INPUT_CHANNELS + STATE_CHANNELS if c in SERVICE_LIST]
 
 WIDTH = 78                      # header rule width; output is clipped to the real terminal width
+CIVIC_STEER_RATIO = 15.38   # what beamngd converts with unless overridden
+
 WINDOW_SECONDS = env_float("BEAMPILOT_MONITOR_WINDOW", 2.0)
 # A channel is flagged when its measured rate falls outside this band around the
 # rate SERVICE_LIST expects. Wide enough not to cry over normal jitter.
@@ -221,6 +223,56 @@ def main():
       out.append(f"  model wants  {requested:+9.5f} 1/m")
       out.append(f"  cap now      {cap:+9.5f} 1/m  ({1 / cap:6.0f} m radius)  [lat accel {MAX_LATERAL_ACCEL_NO_ROLL} m/s^2]")
       out.append(f"  after clip   {ctl.desiredCurvature:+9.5f} 1/m  {mark}")
+
+      # Commanded vs ACHIEVED curvature. This is the check that separates the
+      # three reasons the car can run wide, which look identical from the seat:
+      #
+      #   model asks for little        -> the camera cannot see the corner
+      #   asks a lot, achieves a lot   -> it IS turning; the road is just tighter
+      #   asks a lot, achieves little  -> the curvature->steering conversion is
+      #                                   wrong, or the tyres are sliding
+      #
+      # The third is the one nothing else here would show. beamngd converts
+      # desiredCurvature to a wheel angle OPEN LOOP, using the Civic's
+      # steerRatio -- so if the BeamNG vehicle needs more lock for the same
+      # curvature, the car simply under-turns forever and no feedback corrects
+      # it. The ratio below is the correction factor.
+      out.append(f"\n{DIM}--- is the car turning as hard as it was told? ---{RST}")
+      yaw = sm['deviceMotion'].angularVelocityDevice.z
+      commanded = ctl.desiredCurvature
+      if not cc.latActive:
+        out.append("  not steering (latActive false)")
+      elif cs.vEgo < 3.0:
+        out.append("  too slow to measure -- needs a steady corner above ~7 mph")
+      else:
+        achieved = yaw / max(cs.vEgo, 1e-3)
+        out.append(f"  commanded {commanded:+9.5f} 1/m"
+                   + (f"  ({1 / abs(commanded):6.0f} m radius)" if abs(commanded) > 1e-5 else ""))
+        out.append(f"  achieved  {achieved:+9.5f} 1/m"
+                   + (f"  ({1 / abs(achieved):6.0f} m radius)" if abs(achieved) > 1e-5 else ""))
+        out.append(f"  wheel angle {cs.steeringAngleDeg:+7.1f} deg"
+                   + f"   lateral accel {abs(yaw) * cs.vEgo:5.2f} m/s^2")
+        # Only meaningful in a real corner: at near-zero curvature the ratio is
+        # two small noisy numbers divided by each other.
+        if abs(commanded) > 0.002:
+          follow = abs(achieved) / abs(commanded)
+          if achieved * commanded < 0:
+            out.append(f"  {RED}turning the WRONG WAY relative to the command{RST}")
+          elif follow < 0.8:
+            need = CIVIC_STEER_RATIO / max(follow, 1e-3)
+            out.append(f"  {YEL}following only {follow * 100:3.0f}% of the command{RST}"
+                       + f" -- under-turning by {1 / follow:.2f}x")
+            out.append("      if this holds steady across corners, the steering geometry is off:")
+            out.append(f"      BEAMPILOT_STEER_RATIO ~ {need:.1f} (currently using the Civic's {CIVIC_STEER_RATIO})")
+            out.append("      if it only appears at high lateral accel, the tyres are sliding instead")
+          elif follow > 1.25:
+            need = CIVIC_STEER_RATIO / follow
+            out.append(f"  {YEL}over-turning by {follow:.2f}x{RST}"
+                       + f" -- BEAMPILOT_STEER_RATIO ~ {need:.1f}")
+          else:
+            out.append(f"  following {follow * 100:3.0f}% of the command -- conversion looks right")
+        else:
+          out.append("  going too straight to judge -- hold a steady corner")
 
       # The lead car. On beampilot this comes from the BeamNG mod's ground-truth
       # radar (radar=True) rather than from the camera (radar=False) -- which

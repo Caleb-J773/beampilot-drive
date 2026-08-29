@@ -144,6 +144,42 @@ LANE_CHANGE_ABORT_WINDOW = env_float("BEAMPILOT_LANE_CHANGE_ABORT_S", 2.0)
 REPORT_GEAR = env_bool("BEAMPILOT_REPORT_GEAR", True)
 
 
+# The one place the fake Honda's identity still reaches the driving: beamngd
+# turns openpilot's desiredCurvature into a wheel angle with the CIVIC's
+# geometry, because that is what CarParams says. Nothing anywhere closes a loop
+# on the result -- the model does eventually notice the car is off its path, but
+# there is no controller integrating the error -- so if the BeamNG vehicle needs
+# more lock for the same curvature, it simply under-turns forever.
+#
+# steerRatio dominates: wheel angle scales with it almost exactly. Measure it
+# rather than guess -- tools/beampilot_monitor.py compares the curvature
+# commanded against the curvature achieved (yaw rate / speed) and prints the
+# ratio a steady corner implies. Unset means the car's own CarParams value,
+# which is stock behaviour.
+_GEOMETRY_FIELDS = {
+  "steerRatio": "BEAMPILOT_STEER_RATIO",        # Civic 15.38; the binding one
+  "wheelbase": "BEAMPILOT_WHEELBASE_M",         # Civic 2.70
+  "centerToFront": "BEAMPILOT_CENTER_TO_FRONT_M",  # Civic 1.08
+  "mass": "BEAMPILOT_MASS_KG",                  # Civic 1462
+}
+
+
+def vehicle_geometry_overrides() -> dict[str, float]:
+  """Only the fields actually set, so an unset environment changes nothing."""
+  out = {}
+  for field, var in _GEOMETRY_FIELDS.items():
+    raw = os.environ.get(var, "").strip()
+    if not raw:
+      continue
+    try:
+      value = float(raw)
+    except ValueError:
+      continue
+    if value > 0:
+      out[field] = value
+  return out
+
+
 def gear_for(gear_index: int, report: bool | None = None) -> str:
   """BeamNG's gearIndex as one of SimulatorState's four gear strings.
 
@@ -571,9 +607,15 @@ class BeamNGBridge:
         with car.CarParams.from_bytes(cp_bytes) as CP:
           # VehicleModel.__init__ copies out plain floats it needs (mass,
           # wheelbase, etc.) into its own attributes, so the resulting object
-          # remains valid after this `with` block exits.
-          self.vehicle_model = VehicleModel(CP)
-        print("[beamngd] CarParams loaded, VehicleModel ready for steering", flush=True)
+          # remains valid after this `with` block exits -- and so overriding
+          # them has to happen BEFORE it is constructed.
+          builder = CP.as_builder()
+          for field, value in vehicle_geometry_overrides().items():
+            setattr(builder, field, value)
+          self.vehicle_model = VehicleModel(builder)
+        print("[beamngd] CarParams loaded, VehicleModel ready for steering"
+              + (f" (overrides: {vehicle_geometry_overrides()})"
+                 if vehicle_geometry_overrides() else ""), flush=True)
 
     if self.vehicle_model is not None:
       # get_steer_from_curvature() is opendbc's own inverse of calc_curvature(),

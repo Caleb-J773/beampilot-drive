@@ -214,6 +214,19 @@ def build_sections() -> list[Section]:
               "Changing this breaks beamngd -- CAN layouts differ per car.",
               "HONDA_CIVIC_2022",
               warn="beamngd packs Honda Bosch CAN; another car needs code changes"),
+      Setting("BEAMPILOT_STEER_RATIO", "Steering ratio",
+              "How many degrees of steering wheel per degree of road wheel. THE setting to check if"
+              + " the car understeers through corners and raising the lateral limit changed nothing:"
+              + " beampilot converts openpilot's requested curvature into a wheel angle with this,"
+              + " open loop, so if it is too low the car under-turns forever and nothing corrects it."
+              + " Blank uses the fake Honda Civic's 15.38, which is almost certainly wrong for your"
+              + " BeamNG vehicle. Measure it: the monitor compares commanded against achieved"
+              + " curvature in a steady corner and prints the value that would match.",
+              "", numeric=True, step=0.5),
+      Setting("BEAMPILOT_WHEELBASE_M", "Wheelbase (m)",
+              "Front axle to rear axle. Blank uses the Civic's 2.70. Much less important than the"
+              + " steering ratio above -- it mostly affects the speed-dependent understeer term.",
+              "", numeric=True, step=0.05),
       Setting("BEAMPILOT_STEER_LOCK_DEG", "Steering lock (deg)",
               "Your BeamNG vehicle's full lock. Measure it in the monitor. Too low oversteers, too high runs wide.",
               "510.0", numeric=True, step=10.0),

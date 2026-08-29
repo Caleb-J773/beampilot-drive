@@ -23,7 +23,7 @@ export SKIP_FW_QUERY="1"
 # LATERAL (turning). The binding one is lateral accel: max curvature is
 # MAX_LAT_ACCEL / v^2, so stock 3.0 allows only a ~300m radius at 67mph.
 #   3.0 = stock/comfort   5.0 = spirited   8.0+ = approaching real tire grip
-export BEAMPILOT_MAX_LAT_ACCEL="8.0"    # m/s^2
+export BEAMPILOT_MAX_LAT_ACCEL="13.0"    # m/s^2
 export BEAMPILOT_MAX_LAT_JERK="8.0"    # m/s^3, how fast it may change curvature
 # export BEAMPILOT_MAX_CURVATURE="0.2"  # 1/m, geometric cap; only binds below ~11mph
 #
@@ -136,6 +136,22 @@ export BEAMPILOT_CAM_WINDOW="beamng"
 # Your BeamNG vehicle's steering lock, in degrees. Per-vehicle: hold full lock
 # and read steering_wheel_deg in tools/beampilot_monitor.py to find yours.
 # Too low makes openpilot oversteer, too high makes it run wide.
+# Steering geometry. beampilot turns openpilot's requested curvature into a
+# wheel angle using CarParams -- which is the fake Honda Civic's, since that is
+# the fingerprint. Nothing closes a loop on the result: the model does
+# eventually notice the car is off its path, but no controller integrates the
+# error, so if your BeamNG vehicle needs more lock for the same curvature it
+# under-turns forever. That is the usual reason a corner is taken too wide when
+# raising BEAMPILOT_MAX_LAT_ACCEL changed nothing.
+#
+# Measure rather than guess: hold a steady corner and read the
+# "is the car turning as hard as it was told?" block in
+#   uv run python tools/beampilot_monitor.py
+# It prints the ratio between commanded and achieved curvature, and the steering
+# ratio that would match. Unset = the Civic's 15.38.
+# export BEAMPILOT_STEER_RATIO="15.38"
+# export BEAMPILOT_WHEELBASE_M="2.70"
+
 export BEAMPILOT_STEER_LOCK_DEG="500"
 
 # Lock-to-lock sweep time. Lower is snappier but twitchier.
@@ -350,7 +366,7 @@ export HSA_ENABLE_DXG_DETECTION=1
 #
 # BUILD-time as well as runtime: the model is compiled for one backend, so
 # changing this means re-running setup_beampilot.sh.
-export BEAMPILOT_BACKEND="nv"
+export BEAMPILOT_BACKEND="cuda"
 
 # USE_NV / USE_AMD are the upstream openpilot spelling and still work; they are
 # only consulted when BEAMPILOT_BACKEND is unset.
@@ -570,3 +586,6 @@ export BEAMPILOT_CAM_MONITOR="1"
 # export BEAMPILOT_GPU_INDEX="1"   # blank = auto-detect a card the backend can drive
 # export SCALE=""
 export BEAMPILOT_LAUNCH_DELAY="0"
+
+# --- added by tools/beampilot_tui.py ---
+export BEAMPILOT_GPU_INDEX="2"
