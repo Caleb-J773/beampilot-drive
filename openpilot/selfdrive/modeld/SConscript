@@ -30,12 +30,19 @@ if arch == 'comma_arm64':
   tg_backend = 'QCOM'
   tg_flags = f'DEV={tg_backend} IMAGE=1 FLOAT16=1 NOLOCALS=1 JIT_BATCH_SIZE=0 OPENPILOT_HACKS=1'
 else:
+  # beampilot: pick WHICH physical GPU on a multi-GPU machine. tinygrad selects
+  # a device with the "NV:1" / "AMD:1" suffix (device.py splits on ":"); index 0
+  # is the default and canonicalises back to a bare "NV". This is a BUILD-time
+  # flag, so changing it requires a rebuild -- useful when the game should
+  # render on one card and the driving model run on another.
+  _gpu_idx = os.getenv('BEAMPILOT_GPU_INDEX', '0')
+  _dev_suffix = f':{_gpu_idx}' if _gpu_idx.isdigit() and _gpu_idx != '0' else ''
   if os.getenv('USE_AMD') == '1':
     tg_backend = 'AMD'
-    tg_flags = 'DEV=AMD'
+    tg_flags = f'DEV=AMD{_dev_suffix}'
   elif os.getenv('USE_NV') == '1':
     tg_backend = 'NV'
-    tg_flags = 'DEV=NV'
+    tg_flags = f'DEV=NV{_dev_suffix}'
   else:
     tg_backend = 'CPU'
     tg_flags = f'DEV=CPU' if arch == 'Darwin' else 'DEV=CPU:LLVM'

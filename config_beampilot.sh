@@ -79,12 +79,26 @@ export BEAMPILOT_IGNORE_COMM_ISSUE="1"
 # Signal with , (left) and . (right) while engaged above 20mph.
 export BEAMPILOT_AUTO_LANE_CHANGE="1"
 
-# Silence the audible alert chimes. manager.py:114 treats every comma-separated
-# name in BLOCK as a process not to start; soundd is the one that plays alert
-# sounds. Visual alerts still appear in the UI -- this only mutes audio, it does
-# NOT suppress the underlying events or stop them from disengaging.
-# Remove soundd from this list to get the chimes back.
-export BLOCK="${BLOCK},soundd"
+# Processes not to start. manager.py:114 treats every comma-separated name here
+# as blocked.
+#
+#   soundd          -- the alert chimes. Visual alerts still appear in the UI;
+#                      this only mutes audio, it does NOT suppress the
+#                      underlying events or stop them from disengaging.
+#   uploader        -- uploads drive logs to comma's servers.
+#   manage_athenad  -- athena, comma connect's remote access/telemetry channel.
+#
+# Those two are belt-and-suspenders, not the actual safeguard: manager.py:110
+# already skips both whenever DongleId is None or UNREGISTERED_DONGLE_ID, and an
+# unregistered install is always the latter. Listing them here means they stay
+# off even if this device ever gets registered -- simulator footage of a fake
+# Honda has no business near comma's training data.
+#
+# Also already inert, and so not listed: Sentry crash reporting (sentry.py bails
+# unless the git origin contains "commaai" AND the device is registered AND it
+# isn't a PC -- we fail all three) and device registration (no keypair, so it
+# short-circuits to UNREGISTERED before making any request).
+export BLOCK="${BLOCK},soundd,uploader,manage_athenad"
 export HSA_ENABLE_DXG_DETECTION=1
 
 # to use gpu, pick one, (AMD) or (NV)idia

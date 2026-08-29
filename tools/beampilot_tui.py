@@ -65,7 +65,8 @@ def gpu_options() -> list[str]:
   return opts or ["nvidia", "amd"]
 
 
-def gpu_detail() -> str:
+def gpu_list() -> list[str]:
+  """Per-device names, indexed the way tinygrad's DEV=NV:n selects them."""
   names = []
   try:
     out = subprocess.run(["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader"],
@@ -79,19 +80,33 @@ def gpu_detail() -> str:
     if lspci.returncode == 0:
       for line in lspci.stdout.splitlines():
         if re.search(r"VGA.*\b(AMD|ATI|Radeon)\b", line, re.I):
-          names.append(line.split(":", 2)[-1].strip())
+          names.append(line.split(":", 2)[-1].strip()[:48])
   except (subprocess.SubprocessError, OSError):
     pass
-  return "; ".join(names) if names else "none detected"
+  return names
+
+
+def gpu_detail() -> str:
+  names = gpu_list()
+  if not names:
+    return "none detected"
+  return "; ".join(f"[{i}] {n}" for i, n in enumerate(names))
 
 
 def build_sections() -> list[Section]:
   gpus = gpu_options()
+  devices = gpu_list()
+  device_choices = [str(i) for i in range(max(len(devices), 1))]
+  device_help = ("Which physical GPU runs the model, if you have more than one: "
+                 + (", ".join(f"[{i}] {n}" for i, n in enumerate(devices)) if devices else "none detected")
+                 + ". BUILD-time -- re-run setup after changing.")
   return [
     Section("Hardware", "What this machine has, and which model to run.", [
       Setting("BEAMPILOT_GPU", "GPU backend",
               "Which GPU runs the driving model. It shares the card with BeamNG's rendering.",
               gpus[0], choices=gpus),
+      Setting("BEAMPILOT_GPU_INDEX", "GPU device", device_help, "0", choices=device_choices,
+              warn="build-time setting -- rebuild for this to take effect"),
       Setting("CHESTNUT", "Chestnut model",
               "Larger, better-driving model. Needs 8GB+ VRAM (standard needs 4GB).",
               "0", choices=["0", "1"]),
@@ -130,6 +145,9 @@ def build_sections() -> list[Section]:
       Setting("BEAMPILOT_STEER_SWEEP_SECONDS", "Steering response (s)",
               "Lock-to-lock sweep time. Lower is snappier but twitchier.",
               "0.15", numeric=True, step=0.05),
+      Setting("BEAMPILOT_MAX_CURVATURE", "Max curvature (1/m)",
+              "Hard geometric cap on turn tightness. Only binds below ~11mph; 0.2 = a 5m radius.",
+              "0.2", numeric=True, step=0.05),
     ]),
     Section("Controls", "Keys are read from the keyboard directly, since BeamNG holds focus.", [
       Setting("BEAMPILOT_KEY_SET", "Set / engage key", "Check BeamNG's own bindings before rebinding.", "i"),
@@ -158,6 +176,25 @@ def build_sections() -> list[Section]:
               "1", choices=["1", "0"],
               warn="openpilot will keep driving if modeld stalls"),
       Setting("BLOCK", "Blocked processes", "Comma-separated. soundd mutes the alert chimes.", ",soundd"),
+    ]),
+    Section("Bridge", "How beamngd talks to the game. Defaults are fine unless something conflicts.", [
+      Setting("BEAMPILOT_TICK_HZ", "Bridge rate (Hz)",
+              "How often beamngd runs. 100 matches the CAN rate openpilot expects.",
+              "100", numeric=True, step=10.0),
+      Setting("BEAMPILOT_TELEMETRY_PORT", "Telemetry port",
+              "Mod -> beamngd. Must match TELEMETRY_PORT in the Lua mod; vehicle Lua can't read this.",
+              "49152", numeric=True, step=1.0,
+              warn="change beampilot.lua to match, or telemetry stops"),
+      Setting("BEAMPILOT_CONTROL_PORT", "Control port",
+              "beamngd -> mod. Must also match the Lua mod.",
+              "49153", numeric=True, step=1.0,
+              warn="change beampilot.lua to match, or control stops"),
+      Setting("BEAMPILOT_BEAMNG_ADDRESS", "BeamNG address",
+              "Where the game is. Only change this if BeamNG runs on another machine.",
+              "127.0.0.1"),
+      Setting("BEAMPILOT_LAUNCH_DELAY", "Launch countdown (s)",
+              "Seconds to wait before starting, to tab into the game. 0 = start immediately.",
+              "0", numeric=True, step=1.0),
     ]),
   ]
 

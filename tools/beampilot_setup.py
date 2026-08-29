@@ -216,6 +216,86 @@ def check_gpu():
   return True
 
 
+def detect_package_manager() -> tuple[str, list[str]] | None:
+  """(name, install command prefix) for this distro, or None if unrecognised."""
+  managers = [
+    ("apt", ["sudo", "apt", "install", "-y"]),
+    ("pacman", ["sudo", "pacman", "-S", "--needed", "--noconfirm"]),
+    ("dnf", ["sudo", "dnf", "install", "-y"]),
+    ("zypper", ["sudo", "zypper", "install", "-y"]),
+    ("apk", ["sudo", "apk", "add"]),
+    ("xbps-install", ["sudo", "xbps-install", "-y"]),
+  ]
+  for name, cmd in managers:
+    if shutil.which(name):
+      return name, cmd
+  return None
+
+
+# Package names differ per distro for the same tool.
+SYSTEM_PACKAGES = {
+  "xdotool": {"apt": "xdotool", "pacman": "xdotool", "dnf": "xdotool",
+              "zypper": "xdotool", "apk": "xdotool", "xbps-install": "xdotool"},
+  "xprop": {"apt": "x11-utils", "pacman": "xorg-xprop", "dnf": "xorg-x11-utils",
+            "zypper": "xprop", "apk": "xprop", "xbps-install": "xprop"},
+}
+
+
+def check_system_deps():
+  """Tools beampilot shells out to. Missing ones degrade features, not break them."""
+  hr("System packages")
+  pm = detect_package_manager()
+  missing = [tool for tool in SYSTEM_PACKAGES if not shutil.which(tool)]
+
+  for tool in SYSTEM_PACKAGES:
+    if shutil.which(tool):
+      print(f"  {OK} {tool}")
+    else:
+      print(f"  {WARN} {tool} missing -- window tracking falls back to whole-monitor capture")
+
+  if not missing:
+    return
+  if pm is None:
+    print(f"  {INFO} unknown package manager; install manually: {', '.join(missing)}")
+    return
+
+  name, cmd = pm
+  pkgs = sorted({SYSTEM_PACKAGES[t].get(name, t) for t in missing})
+  full = " ".join(cmd + pkgs)
+  print(f"\n  detected {name}. To install: {BLUE}{full}{RESET}")
+  if ask("Run that now? (needs sudo)", default=False):
+    subprocess.run(cmd + pkgs, check=False)
+
+
+def check_python_deps():
+  """uv owns the Python side; just report whether the venv has been built."""
+  hr("Python environment")
+  if not shutil.which("uv"):
+    print(f"  {FAIL} uv not found -- it manages the Python environment and the build")
+    print(f"      {DIM}curl -LsSf https://astral.sh/uv/install.sh | sh{RESET}")
+    return False
+  print(f"  {OK} uv present")
+
+  venv = os.path.join(REPO, ".venv")
+  if os.path.isdir(venv):
+    print(f"  {OK} .venv exists")
+    missing = []
+    for mod, why in (("mss", "screen capture"), ("cv2", "colour conversion"),
+                     ("evdev", "cruise keys"), ("uinput", "joystick control mode")):
+      rc, _, _ = run([os.path.join(venv, "bin", "python"), "-c", f"import {mod}"], timeout=30)
+      if rc == 0:
+        print(f"  {OK} {mod} ({why})")
+      else:
+        print(f"  {WARN} {mod} missing ({why})")
+        missing.append(mod)
+    if missing and ask("Sync Python dependencies now? (uv sync)", default=True):
+      subprocess.run(["uv", "sync", "--all-extras"], cwd=REPO, check=False)
+    return True
+
+  print(f"  {INFO} .venv not built yet -- setup_beampilot.sh will create it")
+  return True
+
+
 def check_groups():
   hr("Permissions")
   ok = True
@@ -314,7 +394,9 @@ def main():
   if not check_os():
     return 1
   check_gpu()
+  check_system_deps()
   check_display()
+  check_python_deps()
   perms_ok = check_groups()
   userdir, mod = check_beamng()
   detect_window()
