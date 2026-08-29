@@ -184,14 +184,29 @@ uv run python tools/beampilot_tui.py
 Groups all 57 settings under Hardware / Car / Driving limits / Controls / Blind spot / Radar /
 Camera / Alerts / Bridge, with an explanation of each and what the stock openpilot value is.
 Detects your GPUs via `nvidia-smi` and `lspci` and only offers backends this machine has.
-Settings that differ from their default are highlighted; ones with consequences (like
-`BEAMPILOT_IGNORE_COMM_ISSUE`) warn.
 
-`r` runs setup, `L` launches, `m` opens the monitor, `s` saves, `q` quits.
+Every row shows three things: the setting, its value, and where that value came from.
+On/off settings read as `on`/`off` rather than `1`/`0`. The right-hand column says either
+`default` — nothing in the config, so whatever the code decides — or `set · default X`, meaning
+the config pins it and overrides `X`. Settings with consequences (like
+`BEAMPILOT_IGNORE_COMM_ISSUE`) turn that column yellow.
+
+`↑↓` move, `←→`/`enter` change, `d` puts one back to its default, `tab` jumps between sections,
+`/` finds a setting by name, `s` saves, `r` runs setup, `L` launches, `m` opens the monitor,
+`q` quits.
 
 `config_beampilot.sh` remains the source of truth. The TUI rewrites only the `export` lines it
 manages and preserves everything around them, including trailing inline comments. Editing the
 file by hand works fine and round-trips correctly.
+
+**A setting left at its default is not written to the file.** That is deliberate. The TUI used
+to materialise every setting it knew about at whatever the default was that day, and those lines
+then outranked the source forever — change a default and the config still pinned the old number,
+while the TUI, reading the same file, showed the stale value as current. Unset has to stay unset
+for "unset means stock" to mean anything. `tools/test_beampilot_tui.py` checks both halves of
+that: every default the TUI displays is compared against the `env_bool`/`env_float` call it
+actually comes from, and the config is checked for lines that pin a value the code already
+defaults to.
 
 </details>
 
@@ -401,11 +416,11 @@ Too low makes openpilot oversteer, too high makes it run wide.
 |---|---|---|
 | `BEAMPILOT_KEY_SET` / `_RESUME` / `_CANCEL` | `i` / `o` / `u` | Cruise keys, single letters. |
 | `BEAMPILOT_CRUISE_STEP_MPH` | `1.0` | Per-tap speed change. |
-| `BEAMPILOT_AUTO_LANE_CHANGE` | `1` | Signal alone commits a lane change. Required here. |
+| `BEAMPILOT_AUTO_LANE_CHANGE` | `0` | Signal alone commits a lane change. There is no wheel to nudge here, so the shipped config turns it on. |
 | `BEAMPILOT_BSM` | `1` | Blind spot monitoring. See [below](#blind-spot-monitoring-bsm). |
 | `BEAMPILOT_LANE_CHANGE_ABORT` | `1` | Cancel a lane change in progress if the target lane fills up. |
 | `BEAMPILOT_SIGNAL_AUTO_CANCEL` | `1` | Switch the blinker off once a lane change finishes. |
-| `BEAMPILOT_RADAR` | `1` | Ground-truth lead detection. See [below](#ground-truth-radar). |
+| `BEAMPILOT_RADAR` | `0` | Ground-truth lead detection. See [below](#ground-truth-radar). |
 | `BEAMPILOT_CONTROL_MODE` | `lua` | `lua` or `joystick`. |
 | `BEAMPILOT_CAM_ASPECT` | `crop` | `crop` or `stretch`. See [Aspect ratio](#aspect-ratio). |
 | `BEAMPILOT_CAM_WINDOW` | `beamng` | Track the game window by name/class. See [Camera capture](#camera-capture). |

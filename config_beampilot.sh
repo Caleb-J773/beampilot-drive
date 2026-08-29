@@ -455,30 +455,9 @@ export BIG="1"
 export CHESTNUT="0"
 
 # --- added by tools/beampilot_tui.py ---
-export BEAMPILOT_CONTROL_MODE="lua"
 export BEAMPILOT_CAM_MONITOR="1"
 
 # --- added by tools/beampilot_tui.py ---
 export BEAMPILOT_GPU_INDEX="0"
 # export SCALE=""
-export BEAMPILOT_MAX_CURVATURE="0.2"
-export BEAMPILOT_LANE_CHANGE_ABORT_S="2.0"
-export BEAMPILOT_BSM_WIDTH_M="3.6"
-export BEAMPILOT_BSM_REAR_M="4.0"
-export BEAMPILOT_BSM_DEBUG="0"
-export BEAMPILOT_RADAR_LEAD_HALF_WIDTH_M="1.8"
-export BEAMPILOT_RADAR_RANGE_M="110"
-export BEAMPILOT_RADAR_HALF_WIDTH_M="3.0"
-export BEAMPILOT_RADAR_MAX_TRACKS="12"
-export BEAMPILOT_RADAR_DEBUG="0"
-export BEAMPILOT_TICK_HZ="100"
-export BEAMPILOT_TELEMETRY_PORT="49152"
-export BEAMPILOT_CONTROL_PORT="49153"
-export BEAMPILOT_BEAMNG_ADDRESS="127.0.0.1"
 export BEAMPILOT_LAUNCH_DELAY="0"
-
-# --- added by tools/beampilot_tui.py ---
-export BEAMPILOT_ACTUATION_MARGIN="2.0"
-
-# --- added by tools/beampilot_tui.py ---
-export BEAMPILOT_CURVE_LAT_ACCEL="2.1"

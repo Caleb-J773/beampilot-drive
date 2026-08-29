@@ -16,6 +16,8 @@ import re
 import shutil
 import subprocess
 import sys
+import textwrap
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -27,6 +29,12 @@ class Setting:
   key: str
   label: str
   help: str
+  # What the CODE does when this variable is unset -- NOT what the shipped
+  # config recommends. The two are different for several settings, and getting
+  # it wrong makes this screen lie: a key absent from the config is displayed
+  # as this value, so a wrong one shows a feature as on when it runs off.
+  # test_beampilot_tui.py checks every one of these against the env_bool/
+  # env_float/env_int/env_str call it comes from, so they cannot drift again.
   default: str
   # choices: cycle through fixed values. None means free text entry.
   choices: list[str] | None = None
@@ -36,6 +44,26 @@ class Setting:
   section: str = ""
   # warn shown in red when the value is not the default
   warn: str = ""
+  # for the few defaults the code derives from another setting
+  derive: "Callable[[dict[str, str]], str] | None" = None
+  # what to SHOW for each stored value, when the stored value is a bare number
+  # that means something. A plain 0/1 toggle gets on/off automatically.
+  value_labels: dict[str, str] | None = None
+
+  def default_for(self, values: dict[str, str]) -> str:
+    return self.derive(values) if self.derive else self.default
+
+  def is_default(self, value: str, values: dict[str, str]) -> bool:
+    """Numeric settings compare by value, so 4 and 4.0 are the same setting."""
+    other = self.default_for(values)
+    if value == other:
+      return True
+    if self.numeric:
+      try:
+        return float(value) == float(other)
+      except ValueError:
+        return False
+    return False
 
 
 @dataclass
@@ -43,6 +71,13 @@ class Section:
   name: str
   blurb: str
   settings: list[Setting] = field(default_factory=list)
+
+
+def _as_float(raw: str | None, fallback: float) -> float:
+  try:
+    return float(raw)  # type: ignore[arg-type]
+  except (TypeError, ValueError):
+    return fallback
 
 
 def gpu_options() -> list[str]:
@@ -110,9 +145,11 @@ def build_sections() -> list[Section]:
       Setting("CHESTNUT", "Chestnut model",
               "Larger, better-driving model. Needs 8GB+ VRAM (standard needs 4GB).",
               "0", choices=["0", "1"]),
-      Setting("BIG", "Display size",
-              "1 = comma 3/3X window (2160x1080). 0 = comma 4 (536x240) -- tiny on a desktop.",
-              "1", choices=["1", "0"]),
+      Setting("BIG", "Window size",
+              "1 = comma 3/3X window (2160x1080). 0 = comma 4 (536x240) -- tiny on a desktop."
+              + " Window scale below resizes whichever of the two you pick.",
+              "1", choices=["1", "0"],
+              value_labels={"1": "2160x1080", "0": "536x240"}),
       Setting("SCALE", "Window scale",
               "Multiplies the base size BIG selects. Blank fits the window to your smallest monitor in"
               + " EITHER direction -- it shrinks BIG=1 to fit a 1080p screen and grows BIG=0 up from its"
@@ -139,24 +176,27 @@ def build_sections() -> list[Section]:
     ]),
     Section("Driving limits", "Stock openpilot follows EU/ISO comfort limits. These are often why it won't corner.", [
       Setting("BEAMPILOT_MAX_LAT_ACCEL", "Lateral accel (m/s2)",
-              "Turning. Max curvature is accel/v^2 -- stock 3.0 allows only a ~300m radius at 67mph.",
-              "5.0", numeric=True, step=0.5),
+              "Turning. Max curvature is accel/v^2 -- stock 3.0 allows only a ~300m radius at 67mph."
+              + " The shipped config raises this to 5.0.",
+              "3.0", numeric=True, step=0.5),
       Setting("BEAMPILOT_MAX_LAT_JERK", "Lateral jerk (m/s3)",
-              "How fast curvature may change. The most likely cause of weaving if raised too far.",
-              "8.0", numeric=True, step=0.5),
+              "How fast curvature may change. The most likely cause of weaving if raised too far."
+              + " The shipped config raises this to 8.0.",
+              "5.0", numeric=True, step=0.5),
       Setting("BEAMPILOT_ACCEL_SCALE", "Accel scale",
-              "Multiplier on the acceleration envelope. 1.0 is stock.",
-              "2.0", numeric=True, step=0.25),
+              "Multiplier on the acceleration envelope. 1.0 is stock; the shipped config uses 2.0.",
+              "1.0", numeric=True, step=0.25),
       Setting("BEAMPILOT_DECEL_SCALE", "Decel scale",
-              "Same for braking. 1.0 is stock.",
-              "1.5", numeric=True, step=0.25),
+              "Same for braking. 1.0 is stock; the shipped config uses 1.5.",
+              "1.0", numeric=True, step=0.25),
       Setting("BEAMPILOT_PERSONALITY", "Following distance",
               "0 aggressive (1.25s, brakes latest) / 1 standard (1.45s) / 2 relaxed (1.75s).",
-              "0", choices=["0", "1", "2"]),
+              "0", choices=["0", "1", "2"],
+              value_labels={"0": "aggressive", "1": "standard", "2": "relaxed"}),
       Setting("BEAMPILOT_STEER_SWEEP_SECONDS", "Steering response (s)",
               "Lock-to-lock sweep time. Lower is snappier but twitchier.",
               "0.15", numeric=True, step=0.05),
-      Setting("BEAMPILOT_CURVE_SLOWDOWN", "Slow for corners (EXPERIMENTAL)",
+      Setting("BEAMPILOT_CURVE_SLOWDOWN", "Slow for corners (test)",
               "Stock openpilot holds the set speed through a bend and only caps acceleration once"
               + " already in it. With a narrow camera the model sees a corner late, so the car carries"
               + " too much speed in and runs wide. This brakes for it beforehand, using the curvature"
@@ -168,7 +208,8 @@ def build_sections() -> list[Section]:
               "What lateral acceleration to aim for in a corner, which sets the speed it slows to."
               + " Defaults to 0.7x the hard lateral limit so there is something in reserve mid-corner."
               + " Higher corners faster.",
-              "2.1", numeric=True, step=0.1),
+              "2.1", numeric=True, step=0.1,
+              derive=lambda v: f"{round(0.7 * _as_float(v.get('BEAMPILOT_MAX_LAT_ACCEL'), 3.0), 3):g}"),
       Setting("BEAMPILOT_ACTUATION_MARGIN", "Actuation headroom",
               "How much room the excessive-actuation check keeps above what the limits above allow."
               + " It soft-disables on MEASURED actuation, so left at stock it becomes a ceiling on the"
@@ -185,8 +226,10 @@ def build_sections() -> list[Section]:
       Setting("BEAMPILOT_KEY_CANCEL", "Cancel key", "", "u"),
       Setting("BEAMPILOT_CRUISE_STEP_MPH", "Speed step (mph)", "Per-tap speed change.", "1.0", numeric=True, step=1.0),
       Setting("BEAMPILOT_AUTO_LANE_CHANGE", "Auto lane change",
-              "Signal alone commits the change. Required here -- there is no wheel to nudge.",
-              "1", choices=["1", "0"]),
+              "Signal alone commits the change. Required here -- there is no wheel to nudge, so with"
+              + " this off (the code default) a signalled lane change never commits. The shipped config"
+              + " turns it on.",
+              "0", choices=["1", "0"]),
       Setting("BEAMPILOT_CONTROL_MODE", "Control mode",
               "lua injects into the game directly. joystick needs axes bound in BeamNG's Options > Controls.",
               "lua", choices=["lua", "joystick"]),
@@ -359,12 +402,37 @@ def read_config() -> dict[str, str]:
   return values
 
 
-def write_config(values: dict[str, str]) -> None:
+TUI_BLOCK_MARKER = "# --- added by tools/beampilot_tui.py ---"
+
+# Settings whose "unset" behaviour is decided by launch_beampilot.sh rather than
+# by a default in the Python. BEAMPILOT_GPU_INDEX is the one that matters: unset
+# means the launcher picks a card by compute capability, which is not the same
+# thing as picking card 0, so dropping an explicit 0 would quietly change which
+# GPU runs the model. These are written out even when they match.
+NEVER_PRUNE = {
+  "BEAMPILOT_GPU_INDEX", "BEAMPILOT_CAM_MONITOR", "BEAMPILOT_CAM_WINDOW",
+  "BEAMPILOT_CAM_REGION", "BEAMPILOT_CAPTURE_BACKEND", "BEAMPILOT_CALIBRATION",
+  "BEAMPILOT_IGNORE_COMM_ISSUE", "BEAMPILOT_PERSONALITY", "BEAMPILOT_LAUNCH_DELAY",
+  "BIG", "SCALE", "CHESTNUT", "FINGERPRINT", "BLOCK", "USE_NV", "USE_AMD",
+}
+
+
+def write_config(values: dict[str, str], defaults: dict[str, str] | None = None) -> None:
   """Rewrite only the export lines we manage, preserving comments and layout.
 
-  Anything not already present is appended in a clearly marked block, so a
-  hand-written config keeps its structure and its comments.
+  A key left at its default is deliberately NOT written. This screen used to
+  materialise every setting it knew about into the file at whatever the default
+  was that day, and those lines then outranked the code forever: change a
+  default in the source and the config still pinned the old one, while this
+  screen -- reading the same file -- cheerfully showed the stale value as
+  current. Unset means "whatever the code does", and it has to stay unset to
+  keep meaning that.
+
+  Lines already in the hand-written part of the file are left in place even
+  when they match the default; they carry the comments that explain them. Only
+  the blocks this tool appended are pruned back.
   """
+  defaults = defaults or {}
   lines: list[str] = []
   if os.path.exists(CONFIG):
     with open(CONFIG) as f:
@@ -372,9 +440,17 @@ def write_config(values: dict[str, str]) -> None:
 
   seen: set[str] = set()
   out: list[str] = []
+  in_tui_block = False
   for line in lines:
+    if line.strip().startswith(TUI_BLOCK_MARKER):
+      in_tui_block = True
+      out.append(line)
+      continue
     m = re.match(r'^(\s*)export\s+([A-Z_][A-Z0-9_]*)=(.*)$', line)
     if not m:
+      # a non-blank, non-export line ends an appended block
+      if line.strip() and not line.strip().startswith("#"):
+        in_tui_block = False
       out.append(line)
       continue
     indent, key, rest = m.group(1), m.group(2), m.group(3)
@@ -383,6 +459,9 @@ def write_config(values: dict[str, str]) -> None:
       continue
     seen.add(key)
     val = values[key]
+    if in_tui_block and key not in NEVER_PRUNE and key in defaults and val == defaults[key]:
+      # back to the default: drop it rather than pinning today's number
+      continue
     # Preserve any trailing inline comment -- those carry the units and stock
     # values, and silently eating them would make the file worse every save.
     comment = ""
@@ -397,17 +476,66 @@ def write_config(values: dict[str, str]) -> None:
     else:
       out.append(f'{indent}export {key}="{val}"{comment}\n')
 
-  missing = {k: v for k, v in values.items() if k not in seen and v != ""}
+  missing = {k: v for k, v in values.items()
+             if k not in seen and v != "" and (k in NEVER_PRUNE or v != defaults.get(k))}
   if missing:
-    out.append("\n# --- added by tools/beampilot_tui.py ---\n")
+    out.append(f"\n{TUI_BLOCK_MARKER}\n")
     for k, v in missing.items():
       if k == "BLOCK":
         out.append(f'export BLOCK="${{BLOCK}}{v}"\n')
       else:
         out.append(f'export {k}="{v}"\n')
 
+  out = _drop_empty_blocks(out)
   with open(CONFIG, "w") as f:
     f.writelines(out)
+
+
+def _drop_empty_blocks(lines: list[str]) -> list[str]:
+  """Remove an appended block header that no longer has anything under it."""
+  out: list[str] = []
+  for i, line in enumerate(lines):
+    if line.strip().startswith(TUI_BLOCK_MARKER):
+      rest = lines[i + 1:]
+      has_export = False
+      for nxt in rest:
+        if nxt.strip().startswith(TUI_BLOCK_MARKER):
+          break
+        if re.match(r'^\s*export\s', nxt):
+          has_export = True
+          break
+        if nxt.strip() and not nxt.strip().startswith("#"):
+          break
+      if not has_export:
+        while out and out[-1].strip() == "":
+          out.pop()
+        continue
+    out.append(line)
+  return out
+
+
+ON_OFF = ("0", "1")
+
+
+def _fit(text: str, width: int) -> str:
+  if width <= 1:
+    return ""
+  return text if len(text) <= width else text[:width - 1] + "\u2026"
+
+
+def display_value(s: Setting, raw: str) -> str:
+  """What goes in the value column.
+
+  A setting that is only ever 0 or 1 reads as on/off. The whole reason this
+  screen exists is to answer "is that feature actually off", and a bare 1 in a
+  column of other bare 1s does not answer it at a glance. BIG and the
+  personality are 0/1 without being switches, so they carry their own labels.
+  """
+  if s.value_labels and raw in s.value_labels:
+    return s.value_labels[raw]
+  if not s.value_labels and s.choices and sorted(s.choices) == list(ON_OFF):
+    return {"1": "on", "0": "off"}.get(raw, raw or "(unset)")
+  return raw if raw != "" else "(unset)"
 
 
 class Tui:
@@ -415,13 +543,23 @@ class Tui:
     self.stdscr = stdscr
     self.sections = build_sections()
     self.values = self.load()
+    self.on_disk = dict(self.values)
     self.rows = self.flatten()
-    self.cursor = 0
-    self.status = "arrow keys to move  ·  enter/space to change  ·  s to save"
+    self.cursor = next(i for i, r in enumerate(self.rows) if r[0] == "setting")
+    self.scroll = 0
+    self.status = ""
     self.dirty = False
+
+  # ---------------------------------------------------------------- state --
 
   def load(self) -> dict[str, str]:
     on_disk = read_config()
+    self.in_file = set(on_disk)
+    # Resolved against the file, not against each other: BEAMPILOT_CURVE_LAT_ACCEL
+    # defaults to 0.7x whatever the lateral limit is, so it has to see the
+    # lateral limit the config actually sets.
+    self.defaults = {s.key: s.default_for(on_disk)
+                     for sec in self.sections for s in sec.settings}
     values = {}
     for sec in self.sections:
       for s in sec.settings:
@@ -431,9 +569,9 @@ class Tui:
           elif on_disk.get("USE_AMD") == "1":
             values[s.key] = "amd"
           else:
-            values[s.key] = s.default
+            values[s.key] = self.defaults[s.key]
         else:
-          values[s.key] = on_disk.get(s.key, s.default)
+          values[s.key] = on_disk.get(s.key, self.defaults[s.key])
     return values
 
   def flatten(self):
@@ -448,6 +586,29 @@ class Tui:
     kind, obj = self.rows[self.cursor]
     return obj if kind == "setting" else None
 
+  def section_of(self, idx: int) -> Section | None:
+    for i in range(idx, -1, -1):
+      kind, obj = self.rows[i]
+      if kind == "section":
+        return obj
+    return None
+
+  def refresh_derived(self):
+    """A derived default follows the setting it is derived from, live."""
+    for sec in self.sections:
+      for s in sec.settings:
+        if s.derive:
+          was = self.defaults.get(s.key)
+          now = s.derive(self.values)
+          self.defaults[s.key] = now
+          if self.values.get(s.key) == was:
+            self.values[s.key] = now
+
+  def unsaved(self, key: str) -> bool:
+    return self.values.get(key) != self.on_disk.get(key)
+
+  # ------------------------------------------------------------ movement --
+
   def move(self, delta: int):
     n = len(self.rows)
     for _ in range(n):
@@ -455,8 +616,51 @@ class Tui:
       if self.rows[self.cursor][0] == "setting":
         return
 
+  def move_page(self, delta: int):
+    for _ in range(8):
+      nxt = self.cursor + delta
+      if not 0 <= nxt < len(self.rows):
+        break
+      self.cursor = nxt
+    if self.rows[self.cursor][0] != "setting":
+      self.move(1 if delta > 0 else -1)
+
+  def move_section(self, delta: int):
+    n = len(self.rows)
+    i = self.cursor
+    for _ in range(n):
+      i = (i + delta) % n
+      if self.rows[i][0] == "section":
+        self.cursor = i
+        self.move(1)
+        return
+
+  def jump_home(self, end: bool = False):
+    self.cursor = len(self.rows) - 1 if end else 0
+    if self.rows[self.cursor][0] != "setting":
+      self.move(-1 if end else 1)
+
+  def find(self):
+    needle = self.prompt("find: ")
+    if not needle:
+      return
+    needle = needle.lower()
+    n = len(self.rows)
+    for step in range(1, n + 1):
+      idx = (self.cursor + step) % n
+      kind, obj = self.rows[idx]
+      if kind != "setting":
+        continue
+      if needle in obj.label.lower() or needle in obj.key.lower():
+        self.cursor = idx
+        self.status = f"found {obj.key}"
+        return
+    self.status = f"nothing matches {needle!r}"
+
+  # --------------------------------------------------------------- edits --
+
   def cycle(self, s: Setting, delta: int):
-    val = self.values.get(s.key, s.default)
+    val = self.values.get(s.key, self.defaults.get(s.key, s.default))
     if s.choices:
       try:
         i = s.choices.index(val)
@@ -472,24 +676,41 @@ class Tui:
       self.values[s.key] = f"{new:g}"
     else:
       return
+    self.refresh_derived()
     self.dirty = True
 
-  def edit_text(self, s: Setting):
+  def reset(self, s: Setting):
+    self.values[s.key] = self.defaults.get(s.key, s.default)
+    self.refresh_derived()
+    self.dirty = True
+    self.status = f"{s.key} back to its default"
+
+  def prompt(self, label: str, initial: str = "") -> str | None:
     curses.echo()
     curses.curs_set(1)
     h, w = self.stdscr.getmaxyx()
-    prompt = f"  {s.label} = "
     self.stdscr.move(h - 1, 0)
     self.stdscr.clrtoeol()
-    self.stdscr.addstr(h - 1, 0, prompt, curses.A_BOLD)
+    self.stdscr.addstr(h - 1, 0, label, curses.A_BOLD | curses.A_REVERSE)
+    if initial:
+      self.stdscr.addstr(h - 1, len(label), initial)
     try:
-      raw = self.stdscr.getstr(h - 1, len(prompt), 60).decode("utf-8", "ignore")
-      self.values[s.key] = raw.strip()
-      self.dirty = True
+      raw = self.stdscr.getstr(h - 1, len(label) + len(initial),
+                               max(4, w - len(label) - 2)).decode("utf-8", "ignore")
+      out = (initial + raw).strip()
     except (curses.error, UnicodeDecodeError):
-      pass
+      out = None
     curses.noecho()
     curses.curs_set(0)
+    return out
+
+  def edit_text(self, s: Setting):
+    raw = self.prompt(f" {s.label} = ", self.values.get(s.key, ""))
+    if raw is None:
+      return
+    self.values[s.key] = raw
+    self.refresh_derived()
+    self.dirty = True
 
   def save(self):
     to_write = dict(self.values)
@@ -497,9 +718,15 @@ class Tui:
     to_write["USE_NV"] = "1" if gpu == "nvidia" else ""
     to_write["USE_AMD"] = "1" if gpu == "amd" else ""
     try:
-      write_config(to_write)
+      write_config(to_write, self.defaults)
       self.dirty = False
-      self.status = f"saved to {os.path.relpath(CONFIG, REPO)}"
+      # Reload so the screen shows what the file now says rather than what we
+      # thought we were writing -- a default we deliberately left out has to
+      # read back as the default, and this is what proves it did.
+      self.values = self.load()
+      self.on_disk = dict(self.values)
+      n = sum(1 for k, v in self.values.items() if v != self.defaults.get(k))
+      self.status = f"saved to {os.path.relpath(CONFIG, REPO)}  \u00b7  {n} setting(s) overriding a default"
     except OSError as e:
       self.status = f"could not save: {e}"
 
@@ -514,72 +741,160 @@ class Tui:
     self.stdscr.clear()
     curses.doupdate()
 
+  # ---------------------------------------------------------------- draw --
+
+  def put(self, y, x, text, attr=curses.A_NORMAL, w=None):
+    """addstr that clips instead of raising at the edge of the screen."""
+    if y < 0 or x < 0 or not text:
+      return
+    maxx = (w or self.stdscr.getmaxyx()[1]) - 1
+    if x >= maxx:
+      return
+    try:
+      self.stdscr.addstr(y, x, text[:maxx - x], attr)
+    except curses.error:
+      pass
+
+  def layout(self, w):
+    """Column x-positions, degrading as the terminal narrows."""
+    label_w = 30 if w >= 92 else 24
+    value_w = 16 if w >= 92 else 12
+    lx = 3
+    vx = lx + label_w + 1
+    nx = vx + value_w + 2
+    return label_w, value_w, lx, vx, nx if nx < w - 10 else None
+
   def draw(self):
-    self.stdscr.erase()
+    self.stdscr.clear()
     h, w = self.stdscr.getmaxyx()
+    label_w, value_w, lx, vx, nx = self.layout(w)
 
+    overridden = sum(1 for k, v in self.values.items() if v != self.defaults.get(k))
     title = " beampilot setup "
-    self.stdscr.attron(curses.A_REVERSE | curses.A_BOLD)
-    self.stdscr.addstr(0, 0, title.ljust(w - 1)[:w - 1])
-    self.stdscr.attroff(curses.A_REVERSE | curses.A_BOLD)
-
-    detail = f" GPUs: {gpu_detail()}"
-    self.stdscr.addstr(1, 0, detail[:w - 1], curses.A_DIM)
+    right = f"{os.path.relpath(CONFIG, REPO)}  \u00b7  {overridden} overriding a default "
+    if self.dirty:
+      right = "\u25cf unsaved  \u00b7  " + right
+    self.put(0, 0, " " * (w - 1), curses.A_REVERSE)
+    self.put(0, 0, title, curses.A_REVERSE | curses.A_BOLD)
+    self.put(0, max(len(title) + 1, w - 1 - len(right)), right, curses.A_REVERSE)
+    self.put(1, 1, _fit(f"GPUs: {gpu_detail()}", w - 3), curses.A_DIM)
 
     top = 3
-    avail = h - top - 5
-    # keep the cursor in view
-    start = 0
-    if self.cursor > avail - 4:
-      start = self.cursor - (avail - 4)
+    foot = 6                      # rule + help (2) + detail + status + keys
+    avail = max(1, h - top - foot)
+
+    # Scroll by LINES, not by rows: a section header costs three of them (a
+    # blank line, the heading and its rule), so counting rows walked the cursor
+    # off the bottom of a long list and settings simply could not be seen.
+    def cost(idx):
+      return 3 if self.rows[idx][0] == "section" else 1
+
+    if self.cursor < self.scroll:
+      self.scroll = self.cursor
+    while self.scroll < self.cursor and sum(cost(i) for i in range(self.scroll, self.cursor + 1)) > avail:
+      self.scroll += 1
+    while self.scroll > 0 and sum(cost(i) for i in range(self.scroll - 1, self.cursor + 1)) <= avail:
+      self.scroll -= 1
 
     y = top
-    for idx in range(start, len(self.rows)):
-      if y >= top + avail:
+    last = self.scroll
+    for idx in range(self.scroll, len(self.rows)):
+      if y + cost(idx) > top + avail:
         break
+      last = idx
       kind, obj = self.rows[idx]
       if kind == "section":
         if y > top:
           y += 1
-        if y >= top + avail:
-          break
-        self.stdscr.addstr(y, 2, obj.name.upper()[:w - 4], curses.A_BOLD | curses.color_pair(4))
+        self.put(y, 2, obj.name.upper(), curses.A_BOLD | curses.color_pair(4), w)
+        self.put(y, 2 + len(obj.name) + 3, _fit(obj.blurb, w - len(obj.name) - 8),
+                 curses.A_DIM, w)
         y += 1
-      else:
-        val = self.values.get(obj.key, obj.default)
-        shown = val if val != "" else "(unset)"
-        sel = idx == self.cursor
-        attr = curses.A_REVERSE if sel else curses.A_NORMAL
-        label = f"  {obj.label:<26} "
-        self.stdscr.addstr(y, 2, label[:w - 4], attr)
-        vx = 2 + len(label)
-        if vx < w - 2:
-          changed = val != obj.default
-          vattr = curses.color_pair(2) if changed else curses.color_pair(1)
-          if obj.warn and changed:
-            vattr = curses.color_pair(3)
-          self.stdscr.addstr(y, vx, shown[:w - vx - 2], vattr | curses.A_BOLD)
+        self.put(y, 2, "\u2500" * max(0, w - 5), curses.A_DIM, w)
         y += 1
+        continue
 
-    cur = self.current()
-    hy = h - 4
-    self.stdscr.hline(hy - 1, 0, curses.ACS_HLINE, w)
-    if cur:
-      help_text = cur.help or ""
-      self.stdscr.addstr(hy, 2, help_text[:w - 4], curses.A_DIM)
-      if cur.warn and self.values.get(cur.key) != cur.default:
-        self.stdscr.addstr(hy + 1, 2, f"! {cur.warn}"[:w - 4], curses.color_pair(3))
+      val = self.values.get(obj.key, self.defaults.get(obj.key, obj.default))
+      default = self.defaults.get(obj.key, obj.default)
+      changed = not obj.is_default(val, self.values)
+      sel = idx == self.cursor
+      shown = display_value(obj, val)
+
+      row_attr = curses.A_REVERSE if sel else curses.A_NORMAL
+      # Colour says what the value IS; the right-hand column says where it came
+      # from. Keeping those two separate is the point -- "off" and "at the
+      # default" are different facts and used to be conflated into one colour.
+      if shown == "off":
+        vattr = curses.color_pair(5)
+      elif shown == "on":
+        vattr = curses.color_pair(4)
+      elif changed:
+        vattr = curses.color_pair(2)
       else:
-        self.stdscr.addstr(hy + 1, 2, f"{cur.key}   (default: {cur.default or 'unset'})"[:w - 4], curses.A_DIM)
+        vattr = curses.color_pair(1)
+      if sel:
+        vattr = curses.A_REVERSE
 
-    keys = " enter/←→ change   s save   r setup   L launch   m monitor   q quit "
-    mark = "  ● unsaved" if self.dirty else ""
-    self.stdscr.attron(curses.A_REVERSE)
-    self.stdscr.addstr(h - 1, 0, (keys + mark).ljust(w - 1)[:w - 1])
-    self.stdscr.attroff(curses.A_REVERSE)
-    if self.status:
-      self.stdscr.addstr(hy + 2, 2, self.status[:w - 4], curses.A_DIM)
+      self.put(y, 0, " " * (w - 1), row_attr, w)
+      self.put(y, 1, "\u25b8" if sel else " ", row_attr | curses.A_BOLD, w)
+      self.put(y, lx, _fit(obj.label, label_w).ljust(label_w), row_attr, w)
+      self.put(y, vx, _fit(shown, value_w), vattr | curses.A_BOLD, w)
+      if nx:
+        if not changed:
+          note, nattr = "default", curses.A_DIM
+        else:
+          note = f"set \u00b7 default {_fit(display_value(obj, default) or 'unset', 14)}"
+          nattr = curses.color_pair(3) if obj.warn else curses.color_pair(2)
+        if self.unsaved(obj.key):
+          note = "\u25cf " + note
+        self.put(y, nx, _fit(note, w - nx - 2), nattr | (curses.A_REVERSE if sel else 0), w)
+      y += 1
+
+    # scroll hints, so a list longer than the window says so
+    if self.scroll > 0:
+      self.put(top - 1, w - 14, "\u25b2 more above", curses.A_DIM, w)
+    if last < len(self.rows) - 1:
+      self.put(top + avail, w - 14, "\u25bc more below", curses.A_DIM, w)
+
+    self.draw_footer(h, w)
     self.stdscr.refresh()
+
+  def draw_footer(self, h, w):
+    hy = h - 5
+    self.put(hy - 1, 0, "\u2500" * (w - 1), curses.A_DIM, w)
+    cur = self.current()
+    if cur:
+      wrapped = textwrap.wrap(cur.help or "", max(20, w - 6))[:2]
+      for i, line in enumerate(wrapped):
+        self.put(hy + i, 2, line, curses.A_DIM, w)
+      val = self.values.get(cur.key, "")
+      default = self.defaults.get(cur.key, cur.default)
+      if not cur.is_default(val, self.values):
+        detail = (f"{cur.key}={val or '\u2205'}  \u00b7  overrides the default of "
+                  + f"{default or 'unset'}  \u00b7  written to the config")
+        attr = curses.color_pair(3) if cur.warn else curses.color_pair(2)
+        if cur.warn:
+          detail += f"  \u00b7  ! {cur.warn}"
+      elif cur.key in self.in_file:
+        detail = (f"{cur.key}={val or '\u2205'}  \u00b7  the default  \u00b7  "
+                  + "spelled out in the config, which is harmless but pins it")
+        attr = curses.A_DIM
+      else:
+        detail = (f"{cur.key}={val or '\u2205'}  \u00b7  the default  \u00b7  "
+                  + "not in the config, so the code decides")
+        attr = curses.A_DIM
+      if self.unsaved(cur.key):
+        detail = f"unsaved ({self.on_disk.get(cur.key) or '\u2205'} on disk)  \u00b7  " + detail
+      self.put(hy + 2, 2, _fit(detail, w - 4), attr, w)
+
+    keys = (" \u2191\u2193 move   \u2190\u2192/enter change   d default   tab section"
+            + "   / find   s save   r setup   L launch   m monitor   q quit ")
+    self.put(h - 1, 0, " " * (w - 1), curses.A_REVERSE, w)
+    self.put(h - 1, 0, _fit(keys, w - 1), curses.A_REVERSE, w)
+    if self.status:
+      self.put(hy + 3, 2, _fit(self.status, w - 4), curses.A_BOLD | curses.color_pair(4), w)
+
+  # ---------------------------------------------------------------- loop --
 
   def loop(self):
     while True:
@@ -589,9 +904,10 @@ class Tui:
       except KeyboardInterrupt:
         return
       cur = self.current()
+      self.status = ""
       if ch in (ord('q'), 27):
         if self.dirty:
-          self.status = "unsaved changes -- press s to save, or q again to discard"
+          self.status = "unsaved changes -- s to save, or q again to discard"
           self.dirty = False
           continue
         return
@@ -599,10 +915,26 @@ class Tui:
         self.move(1)
       elif ch in (curses.KEY_UP, ord('k')):
         self.move(-1)
+      elif ch == curses.KEY_NPAGE:
+        self.move_page(1)
+      elif ch == curses.KEY_PPAGE:
+        self.move_page(-1)
+      elif ch in (curses.KEY_HOME, ord('g')):
+        self.jump_home()
+      elif ch in (curses.KEY_END, ord('G')):
+        self.jump_home(end=True)
+      elif ch == ord('\t'):
+        self.move_section(1)
+      elif ch == curses.KEY_BTAB:
+        self.move_section(-1)
+      elif ch == ord('/'):
+        self.find()
       elif ch in (curses.KEY_RIGHT, ord('l')) and cur and (cur.choices or cur.numeric):
         self.cycle(cur, 1)
       elif ch in (curses.KEY_LEFT, ord('h')) and cur and (cur.choices or cur.numeric):
         self.cycle(cur, -1)
+      elif ch == ord('d') and cur:
+        self.reset(cur)
       elif ch in (10, 13, ord(' ')) and cur:
         if cur.choices:
           self.cycle(cur, 1)
@@ -625,6 +957,7 @@ def main(stdscr):
   curses.init_pair(2, curses.COLOR_CYAN, -1)
   curses.init_pair(3, curses.COLOR_YELLOW, -1)
   curses.init_pair(4, curses.COLOR_GREEN, -1)
+  curses.init_pair(5, curses.COLOR_RED, -1)
   Tui(stdscr).loop()
 
 

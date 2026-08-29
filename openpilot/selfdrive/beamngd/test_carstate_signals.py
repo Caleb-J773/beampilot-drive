@@ -129,6 +129,51 @@ class SignalRoundTrip(unittest.TestCase):
     self.assertAlmostEqual(decoded["STEER_ANGLE"], 123.4, delta=0.5)
 
 
+class ReportGearActuallyTurnsOff(unittest.TestCase):
+  """BEAMPILOT_REPORT_GEAR=0 has to make reverse unreachable, all the way down.
+
+  The switch exists so openpilot will drive the car backwards -- arcade mode,
+  or shuffling about in a car park. If any part of the chain still lets a
+  reverse gear through, car_events raises reverseGear and openpilot disengages,
+  which looks from the seat like the setting did nothing.
+  """
+
+  def gear_for(self, index, report):
+    from openpilot.selfdrive.beamngd.beamngd import gear_for
+    return gear_for(index, report=report)
+
+  def test_on_reports_what_the_game_reports(self):
+    self.assertEqual(self.gear_for(-1, True), "reverse")
+    self.assertEqual(self.gear_for(0, True), "neutral")
+    self.assertEqual(self.gear_for(1, True), "drive")
+    self.assertEqual(self.gear_for(6, True), "drive")
+
+  def test_off_pins_every_gear_to_drive(self):
+    for index in (-2, -1, 0, 1, 6):
+      self.assertEqual(self.gear_for(index, False), "drive", index)
+
+  def test_off_survives_the_can_round_trip_as_D(self):
+    # The end of the chain: what carstate.py will decode. D is 4, and anything
+    # else here is a reverseGear/wrongGear event.
+    packer = CANPacker(DBC)
+    parser = CANParser(DBC, [], 0)
+    _ = parser.vl["GEARBOX_AUTO"]
+    nanos = 0
+    for index in (-1, 0, 3):
+      state = SimulatorState()
+      state.gear = self.gear_for(index, False)
+      for _ in range(2):
+        nanos += 10_000_000
+        parser.update([(nanos, [packer.make_can_msg("GEARBOX_AUTO", 0,
+                                                    {"GEAR_SHIFTER": GEAR_SHIFTER_VALUES[state.gear]})])])
+      self.assertEqual(parser.vl["GEARBOX_AUTO"]["GEAR_SHIFTER"], 4, f"gearIndex {index}")
+
+  def test_the_default_is_on(self):
+    # Reporting the gear is correct for driving; off is the deliberate choice.
+    from openpilot.common.beampilot_env import env_bool
+    self.assertTrue(env_bool("BEAMPILOT_REPORT_GEAR", True))
+
+
 class TestSimulatedCarStillPacksEverything(unittest.TestCase):
   def test_gear_table_covers_every_state_the_bridge_can_report(self):
     # beamngd maps BeamNG's gearIndex onto these three; park is only reachable

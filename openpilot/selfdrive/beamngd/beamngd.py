@@ -143,6 +143,26 @@ LANE_CHANGE_ABORT_WINDOW = env_float("BEAMPILOT_LANE_CHANGE_ABORT_S", 2.0)
 # gear to drive, which is what the bridge did before it read the real one.
 REPORT_GEAR = env_bool("BEAMPILOT_REPORT_GEAR", True)
 
+
+def gear_for(gear_index: int, report: bool | None = None) -> str:
+  """BeamNG's gearIndex as one of SimulatorState's four gear strings.
+
+  -1 and below is reverse, 0 is neutral, 1 and up is a forward ratio. Park is
+  not distinguishable from neutral without the gear STRING, and both are
+  non-engageable, so park reports as neutral.
+
+  With reporting off the answer is always "drive", which is what the bridge did
+  before it read the real gear at all -- openpilot then never sees reverse, so
+  it never raises reverseGear, so it will drive the car backwards.
+  """
+  if not (REPORT_GEAR if report is None else report):
+    return "drive"
+  if gear_index < 0:
+    return "reverse"
+  if gear_index == 0:
+    return "neutral"
+  return "drive"
+
 LaneChangeState = log.LaneChangeState
 LaneChangeDirection = log.LaneChangeDirection
 
@@ -453,19 +473,7 @@ class BeamNGBridge:
 
     # The mod has always sent these; nothing was reading them, so openpilot
     # believed the car was permanently in drive with the handbrake off.
-    # car_events.py raises wrongGear/reverseGear off gearShifter, which is what
-    # keeps openpilot from engaging while the car is rolling backwards.
-    # BeamNG's gearIndex is -1 reverse / 0 neutral / 1+ forward; park is not
-    # distinguishable from neutral without the gear STRING, and both are
-    # non-engageable, so park reports as neutral.
-    if not REPORT_GEAR:
-      self.state.gear = "drive"
-    elif telemetry.gear < 0:
-      self.state.gear = "reverse"
-    elif telemetry.gear == 0:
-      self.state.gear = "neutral"
-    else:
-      self.state.gear = "drive"
+    self.state.gear = gear_for(telemetry.gear)
     self.state.parking_brake = bool(telemetry.dash_lights & DL_PARKING_BRAKE)
 
     now = time.monotonic()
