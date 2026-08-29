@@ -31,6 +31,7 @@ you spawn, there's no real wide-angle camera, and it will drive into things if y
 - [Install](#install)
 - [Running it](#running-it)
 - [Configuration](#configuration)
+  - [Camera capture](#camera-capture) · [Wayland](#wayland)
 - [How it works](#how-it-works)
 - [Knowledge base](#knowledge-base) — the non-obvious parts, in detail
 - [Troubleshooting](#troubleshooting)
@@ -49,6 +50,8 @@ you spawn, there's no real wide-angle camera, and it will drive into things if y
 | **VRAM** | 4 GB standard model, 8 GB for chestnut-class. |
 | **RAM** | 16 GB standard, 32 GB chestnut. |
 | **Groups** | Your user needs to be in `input` (keyboard reads, and `/dev/uinput` for joystick mode). |
+| **Display** | X11. Wayland works via XWayland in most cases — see [Wayland](#wayland). |
+| **Optional** | `xdotool`, for capturing the BeamNG window rather than a whole monitor. |
 
 > [!NOTE]
 > These are conservative rather than measured floors. The GPU is the real constraint: it's
@@ -60,15 +63,33 @@ you spawn, there's no real wide-angle camera, and it will drive into things if y
 ```bash
 git clone --recurse-submodules https://github.com/Caleb-J773/beampilot-drive.git
 cd beampilot-drive
-./setup_beampilot.sh
+uv run python tools/beampilot_setup.py
 ```
 
-This builds openpilot and symlinks the BeamNG mod into your userfolder.
+The setup tool checks your system before touching anything and tells you what's missing and how
+to fix it. It's read-only until you confirm, and it offers to install the mod and run the build
+for you.
+
+<details>
+<summary>What it checks</summary>
+
+| | |
+|---|---|
+| **OS and Python** | Linux, and whether Python 3.12 is available (uv fetches it otherwise). |
+| **GPU** | Detected via `nvidia-smi` and `lspci`, with the right `USE_NV`/`USE_AMD` to set. |
+| **Display server** | X11 vs Wayland, whether capture will work, and whether `xdotool` is present. |
+| **Permissions** | `input` group membership, with the `usermod` line if you're missing it. |
+| **BeamNG** | Finds the game and your userfolder by parsing Steam's `libraryfolders.vdf`, so installs on secondary drives and flatpak Steam are found rather than guessed at. |
+| **Capture target** | Lists the BeamNG windows it can see, so you can confirm it will grab the right one. |
+
+</details>
+
+If you'd rather do it by hand, `./setup_beampilot.sh` still does the build and mod symlink on its
+own.
 
 > [!IMPORTANT]
-> Launch BeamNG.drive at least once **before** running setup, so
-> `~/.local/share/BeamNG/BeamNG.drive/current/` exists. If you install the game later, just
-> re-run `setup_beampilot.sh`.
+> Launch BeamNG.drive at least once **before** running setup, so the userfolder exists. If you
+> install the game later, just run setup again.
 
 ### Configuring
 
@@ -212,8 +233,9 @@ Too low makes openpilot oversteer, too high makes it run wide.
 | `BEAMPILOT_CRUISE_STEP_MPH` | `1.0` | Per-tap speed change. |
 | `BEAMPILOT_AUTO_LANE_CHANGE` | `1` | Signal alone commits a lane change. Required here. |
 | `BEAMPILOT_CONTROL_MODE` | `lua` | `lua` or `joystick`. |
-| `BEAMPILOT_CAM_MONITOR` | `1` | Which monitor to capture. |
-| `BEAMPILOT_CAM_REGION` | unset | `left,top,width,height` for a windowed BeamNG. |
+| `BEAMPILOT_CAM_WINDOW` | `beamng` | Track the game window by name/class. See [Camera capture](#camera-capture). |
+| `BEAMPILOT_CAM_MONITOR` | `1` | Whole-monitor fallback. |
+| `BEAMPILOT_CAM_REGION` | unset | `left,top,width,height`, a fixed rectangle. |
 | `BEAMPILOT_IGNORE_COMM_ISSUE` | `0` | See warning below. |
 | `BLOCK` | `,soundd` | Processes not to start. `soundd` mutes alert chimes. |
 
@@ -222,6 +244,55 @@ Too low makes openpilot oversteer, too high makes it run wide.
 > under `SIMULATION`, this one changes what openpilot *does*: `commIssue` is registered as both
 > `NO_ENTRY` and `SOFT_DISABLE`, so suppressing it means openpilot keeps steering on stale model
 > output if `modeld` stalls or dies, instead of handing back control. The event is still logged.
+
+### Camera capture
+
+`beamcamd` picks a capture region in this order:
+
+1. **`BEAMPILOT_CAM_REGION`** — a fixed `left,top,width,height` rectangle. Overrides everything.
+2. **`BEAMPILOT_CAM_WINDOW`** — track the BeamNG window. It follows the window as you move or
+   resize it (re-checked every 2 seconds), so the game can be windowed and you keep another
+   monitor free for the openpilot UI and the monitor tool. Needs X11 and `xdotool`.
+3. **`BEAMPILOT_CAM_MONITOR`** — grab a whole monitor. The fallback when no window is found.
+
+Window tracking never hard-fails: if the game isn't running or `xdotool` is missing, it says so
+and falls back to monitor capture.
+
+<details>
+<summary>Why finding the window is harder than it looks</summary>
+
+Three strategies, in order, because none is reliable alone:
+
+**By process.** The honest approach — find BeamNG's PID, ask X which windows it owns. Except
+BeamNG runs inside Steam's pressure-vessel container, so the PID in `_NET_WM_PID` frequently
+doesn't match what `pgrep` sees. On the development machine this returns nothing at all.
+
+**By `WM_CLASS`.** Stable across window titles and locales, so it's tried before titles.
+
+**By title, filtered.** The fallback, and the one that needs care. A bare search for `beamng`
+matched two `gnome-terminal` windows during testing — terminal tabs named after the project
+directory. Capturing a terminal instead of the game is a genuinely confusing thing to debug, so
+title matches are rejected if the window class looks like a terminal, editor, browser or chat
+app, or if the window is smaller than 640×480.
+
+`tools/beampilot_setup.py` prints every candidate it finds, with the strategy that found it, so
+you can confirm it's about to grab the right thing.
+
+</details>
+
+### Wayland
+
+BeamNG.drive is an X11 client, so on a Wayland session it runs through XWayland, and capture
+usually works. "Usually" is doing real work in that sentence: whether an XWayland window's pixels
+are readable depends on your compositor.
+
+> [!WARNING]
+> Capturing **native Wayland** surfaces needs the `xdg-desktop-portal` ScreenCast API and a
+> PipeWire stream. **That is not implemented here.** If your frames come out black, log into an
+> X11/Xorg session.
+
+`tools/beampilot_setup.py` detects your session type and tells you which case you're in rather
+than leaving you to work it out from a black screen.
 
 ## How it works
 
@@ -449,6 +520,9 @@ never runs there, since that driver is disabled.
 | Bursts of `observation too old` | `modeld` behind, GPU contention | Lower BeamNG's graphics settings |
 | `Address already in use` on 49152 | A previous `beamngd` still running | `pkill -f beamngd.py` |
 | Nothing publishing at all | Stack not running | `tools/beampilot_diag.py` |
+| Camera frames are black | Wayland compositor blocking capture | Use an X11 session — see [Wayland](#wayland) |
+| It's capturing the wrong window | Ambiguous title match | Run `tools/beampilot_setup.py` to list candidates; pin it with `BEAMPILOT_CAM_REGION` |
+| Model sees nothing / drives blind | Capturing the wrong monitor | Set `BEAMPILOT_CAM_WINDOW=beamng`, or fix `BEAMPILOT_CAM_MONITOR` |
 
 > [!TIP]
 > Almost every question here is answered by `tools/beampilot_monitor.py`. Rates tell you what's
@@ -515,7 +589,10 @@ About **1,650 lines across 22 files**.
   managing 15.3 Hz before optimisation.
 - **The BeamNG mod** — new.
 - **`abeamngd.py`** — deleted; depended on the unavailable `beamngpy`.
-- **Tooling** — `beampilot_tui.py`, `beampilot_monitor.py`, `beampilot_diag.py`.
+- **Window-tracking capture** — `window_capture.py` finds the game window instead of grabbing a
+  whole monitor, and follows it as it moves.
+- **Tooling** — `beampilot_setup.py` (guided install and system check), `beampilot_tui.py`
+  (config), `beampilot_monitor.py` and `beampilot_diag.py` (diagnostics).
 
 </details>
 
