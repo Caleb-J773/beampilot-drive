@@ -27,7 +27,7 @@ you spawn, there's no real wide-angle camera, and it will drive into things if y
 
 ## Contents
 
-- [Requirements](#requirements)
+- [Requirements](#requirements) · [Dependencies](#dependencies)
 - [Install](#install)
 - [Running it](#running-it)
 - [Configuration](#configuration)
@@ -57,6 +57,71 @@ you spawn, there's no real wide-angle camera, and it will drive into things if y
 > These are conservative rather than measured floors. The GPU is the real constraint: it's
 > shared between rendering and inference, and a weaker card shows up as dropped camera frames
 > before anything else breaks.
+
+### Dependencies
+
+`setup_beampilot.sh` installs everything below automatically. This list is here so you can see
+what it's going to touch, or install by hand.
+
+<details>
+<summary><b>System packages</b> — installed by openpilot's own <code>tools/setup_dependencies.sh</code></summary>
+
+| Distro | Command |
+|---|---|
+| Debian/Ubuntu | `sudo apt-get install -y ca-certificates build-essential curl libcurl4-openssl-dev locales git xclip wl-clipboard` |
+| Arch | `sudo pacman -S --needed base-devel ca-certificates curl git` |
+| Fedora/RHEL | `sudo dnf install -y ca-certificates gcc gcc-c++ make curl libcurl-devel glibc-langpack-en git` |
+| openSUSE | `sudo zypper install ca-certificates gcc gcc-c++ make curl libcurl-devel glibc-locale git` |
+| Alpine | `sudo apk add ca-certificates build-base curl curl-dev musl-locales git` |
+| Void | `sudo xbps-install -Syu base-devel ca-certificates curl git libcurl-devel glibc-locales` |
+
+</details>
+
+<details>
+<summary><b>Extra system packages</b> — beampilot-specific, optional but recommended</summary>
+
+| Package | Needed for | Without it |
+|---|---|---|
+| `xdotool` | Finding and tracking the BeamNG window | Falls back to whole-monitor capture |
+| `xprop` (`x11-utils` on apt, `xorg-xprop` on Arch) | Filtering out non-game windows by class | Window matching is less reliable |
+
+`tools/beampilot_setup.py` detects your package manager and offers to install these with the
+right package names for your distro.
+
+</details>
+
+<details>
+<summary><b>Python packages</b> — managed by <code>uv</code>, from <code>pyproject.toml</code></summary>
+
+**beampilot-specific:**
+
+| Package | Used by | For |
+|---|---|---|
+| `mss` | `beamcamd` | Screen capture |
+| `opencv-python-headless` | `beamcamd` | BGRA→NV12 conversion (~48× faster than numpy) |
+| `evdev` | `beamngd` | Reading cruise keys while BeamNG has focus |
+| `python-uinput` | `beamngd` | Virtual wheel, only for `BEAMPILOT_CONTROL_MODE=joystick` |
+
+**Inherited from openpilot:** `numpy`, `pycapnp`, `scons`, `requests`, `tqdm`, `sounddevice`,
+`pyzmq`, `setproctitle`, `zstandard`, `jeepney`, `PyJWT[crypto]`, `websocket_client`, `inputs`,
+`sentry-sdk`, plus comma's vendored native builds (`capnproto`, `acados`, `ffmpeg`, `zstd`,
+`zeromq`, `json11`, `git-lfs`, `raylib`, `gcc-arm-none-eabi`).
+
+**Submodules** (cloned with `--recurse-submodules`): `msgq`, `opendbc`, `panda`, `rednose`,
+`teleoprtc`, `tinygrad`.
+
+</details>
+
+<details>
+<summary><b>Toolchain</b></summary>
+
+| | |
+|---|---|
+| [`uv`](https://docs.astral.sh/uv/) | Manages Python 3.12 and the venv. Install: `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
+| `git` + `git-lfs` | LFS pulls the model weights. The vendored `comma-deps-git-lfs` covers this. |
+| A C/C++ toolchain | `scons` builds openpilot's native parts. Covered by `build-essential`/`base-devel`. |
+
+</details>
 
 ## Install
 
@@ -249,14 +314,50 @@ Too low makes openpilot oversteer, too high makes it run wide.
 
 ### Vehicles
 
-Tested and working to some degree:
+<table>
+<tr>
+<td width="50%" valign="top">
 
-| Vehicle | Notes |
-|---|---|
-| **ETK series** (800, I, K) | Best results. The camera framing was tuned against these, and the hood sits where the model expects it. |
-| **Bastion** | Works. |
-| **SBR4** | Works. |
-| **Sunburst** | Works. |
+#### 🟢 Recommended
+
+**ETK 800 · ETK I · ETK K**
+
+The camera framing was tuned against these. The hood sits where the model
+expects it, and the view isn't clipped.
+
+Start here if you want it to just work.
+
+</td>
+<td width="50%" valign="top">
+
+#### 🟡 Works, with caveats
+
+**Bastion · SBR4 · Sunburst**
+
+Drive fine, but show less of the hood and the view clips slightly — the
+camera offsets are fixed, not per-vehicle.
+
+Expect to tune before these feel as good.
+
+</td>
+</tr>
+</table>
+
+Anything else is untested rather than known-broken. If you try one, the framing is the first
+thing to check.
+
+**Per-vehicle tuning**, in rough order of impact:
+
+| What | Where | Symptom if wrong |
+|---|---|---|
+| Steering lock | `BEAMPILOT_STEER_LOCK_DEG` | Oversteers (too low) or runs wide (too high) |
+| Camera height | `offUp` in `openpilot_cam` | Misjudges distance — the model assumes ~1.22 m |
+| Camera fore/aft | `offFwd` | Too much or too little hood in frame |
+| Lateral offset | `offRight` | Tracks consistently to one side of the lane |
+
+The camera mod lives at
+`tools/beamng_mod/openpilot_cam/lua/ge/extensions/core/cameraModes/openpilot.lua`. Edits apply
+live — reload with <kbd>Ctrl</kbd>+<kbd>L</kbd> in game.
 
 > [!NOTE]
 > **Outside the ETK series the framing is off.** Other cars show less of the hood and the view is
