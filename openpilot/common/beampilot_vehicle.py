@@ -55,12 +55,13 @@ With both of those right the chain closes exactly: beamngd multiplies by
 steerRatio and divides by steerLockDeg, and BeamNG multiplies by steerLockDeg
 and divides by the same rack. Nothing is left to a fudge factor.
 """
+import json
 import os
 import socket
 import struct
 import time
 
-from openpilot.common.beampilot_env import env_bool, env_float, env_int
+from openpilot.common.beampilot_env import env_bool, env_float, env_int, env_str
 
 MAGIC = b"BPV1"
 NAME_LEN = 32
@@ -81,6 +82,39 @@ GEOMETRY_ADDRESS = "127.0.0.1"
 # -- the car is still the same car -- and dropping back to a Civic's steerRatio
 # mid-corner because a datagram went missing would be far worse than holding a
 # measurement from a second ago. A respawn resets the mod, which re-measures.
+
+# A steer ratio has to be measured, which means it is not known the moment a
+# vehicle spawns. Two things stop that mattering.
+#
+# First, it is remembered. The measurement is cached per vehicle AND per rack,
+# so a car is measured once and is right from the next spawn onward. Keyed on
+# the steering lock rather than the vehicle alone because BeamNG's racks are
+# PARTS, not car properties: an ETK 800 ships locks of 275, 360, 400, 450 and
+# 510 degrees, and an Autobello 360 through 720. A per-car table would be wrong
+# the first time you fit a different rack.
+#
+# Second, until it is measured there is a far better guess available than a
+# Honda's. Within a vehicle the steering hydro's displacement barely changes
+# between rack options (a Covet is 0.098 for every lock from 400 to 540), so the
+# road wheel angle at full lock is set by the suspension and is roughly fixed --
+# which makes the ratio very nearly proportional to the steering LOCK, and the
+# lock is readable out of the jbeam the instant the car spawns. A 900-degree bus
+# and a 275-degree race rack are then not both assumed to be a 15.38 Civic.
+SEED_FROM_LOCK = env_bool("BEAMPILOT_SEED_STEER_RATIO", True)
+# Road wheel angle at full lock, degrees. Physically bounded -- a road car runs
+# out of suspension travel and tyre clearance somewhere in the low thirties --
+# which is what makes one number usable across the whole vehicle list.
+TYPICAL_MAX_WHEEL_ANGLE_DEG = env_float("BEAMPILOT_TYPICAL_MAX_WHEEL_ANGLE_DEG", 33.0)
+
+# Where measured ratios are remembered. Plain JSON, and meant to be edited: a
+# value you measured properly and trust belongs in here, and hand-editing it is
+# the supported way to pin one vehicle without pinning every vehicle the way
+# BEAMPILOT_STEER_RATIO does.
+RATIO_CACHE_PATH = env_str("BEAMPILOT_STEER_RATIO_CACHE",
+                           os.path.expanduser("~/.config/beampilot/steer_ratios.json"))
+# Below this a cached entry is not trusted enough to keep, and a fresh
+# measurement replaces it. Above it, the cache is as good as the live value.
+RATIO_CACHE_MIN_SAMPLES = env_int("BEAMPILOT_STEER_RATIO_CACHE_MIN_SAMPLES", 200)
 
 # The manual override, unchanged in meaning: set one of these and it wins over
 # both BeamNG and CarParams. Blank means "whatever the layer below says".
@@ -174,23 +208,148 @@ def env_overrides() -> dict[str, float]:
   return out
 
 
-def resolve(measured: dict[str, float]) -> dict[str, float]:
+def seed_steer_ratio(lock_deg: float) -> float | None:
+  """A ratio implied by the steering lock, for before anything is measured.
+
+  lock / (road wheel angle at lock). The denominator is the part that has to be
+  assumed, and it is the assumable one: it is a physical limit of the
+  suspension, roughly the same on everything with wheels, while the lock is the
+  part that swings from 270 to 900 and is known exactly.
+  """
+  if not SEED_FROM_LOCK or lock_deg <= 0 or TYPICAL_MAX_WHEEL_ANGLE_DEG <= 0:
+    return None
+  ratio = lock_deg / TYPICAL_MAX_WHEEL_ANGLE_DEG
+  lo, hi = LIMITS["steerRatio"]
+  return ratio if lo <= ratio <= hi else None
+
+
+class SteerRatioCache:
+  """Measured steer ratios, remembered per vehicle and per rack.
+
+  Deliberately a plain readable JSON file rather than a Params blob: the whole
+  point is that you can look at what was measured, and correct it by hand if a
+  vehicle measured badly.
+  """
+
+  def __init__(self, path: str = RATIO_CACHE_PATH):
+    self.path = path
+    self.entries: dict[str, dict] = {}
+    self.load()
+
+  @staticmethod
+  def key(name: str, lock_deg: float) -> str:
+    """Vehicle plus rack. Rounded, so float noise cannot fragment the cache."""
+    return f"{name or 'unknown'}|{round(lock_deg)}"
+
+  def load(self) -> None:
+    try:
+      with open(self.path, encoding="utf-8") as f:
+        loaded = json.load(f)
+      if isinstance(loaded, dict):
+        self.entries = {k: v for k, v in loaded.items() if isinstance(v, dict)}
+    except (OSError, ValueError):
+      # A missing or corrupt cache is not an error: it just means nothing has
+      # been measured yet, which is where every vehicle starts anyway.
+      self.entries = {}
+
+  def get(self, name: str, lock_deg: float) -> float | None:
+    entry = self.entries.get(self.key(name, lock_deg))
+    if not entry:
+      return None
+    ratio = entry.get("steerRatio")
+    lo, hi = LIMITS["steerRatio"]
+    if not isinstance(ratio, int | float) or not (lo <= ratio <= hi):
+      return None
+    return float(ratio)
+
+  def put(self, name: str, lock_deg: float, ratio: float, samples: int) -> bool:
+    """Remember a measurement. True if this changed what is on disk.
+
+    Only takes a measurement built from enough samples, and only replaces a
+    stored one with a better-supported measurement -- so a long careful drive is
+    not overwritten by the first corner of the next session.
+    """
+    lo, hi = LIMITS["steerRatio"]
+    if samples < RATIO_CACHE_MIN_SAMPLES or not (lo <= ratio <= hi):
+      return False
+    key = self.key(name, lock_deg)
+    existing = self.entries.get(key)
+    if existing and existing.get("samples", 0) >= samples and \
+       abs(existing.get("steerRatio", 0.0) - ratio) < 0.05:
+      return False
+    self.entries[key] = {
+      "vehicle": name,
+      "steerLockDeg": round(lock_deg, 1),
+      "steerRatio": round(ratio, 3),
+      "samples": int(samples),
+      "measuredAt": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    return self.save()
+
+  def save(self) -> bool:
+    try:
+      os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
+      # Write-then-rename, so an interrupted save cannot leave a half-written
+      # file that reads back as "nothing has ever been measured".
+      tmp = self.path + ".tmp"
+      with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(dict(sorted(self.entries.items())), f, indent=2)
+        f.write("\n")
+      os.replace(tmp, self.path)
+      return True
+    except OSError:
+      return False
+
+
+def resolve(measured: dict[str, float], samples: int = 0, name: str = "",
+            cache: "SteerRatioCache | None" = None) -> dict[str, float]:
   """What to actually put on CarParams, in precedence order.
 
   1. BEAMPILOT_* environment -- an explicit human decision, always wins.
-  2. BeamNG's measurement of the vehicle actually spawned.
-  3. (whatever is left) CarParams' own value, by simply not appearing here.
+  2. What the mod measured on this vehicle, this run.
+  3. What was measured on this vehicle and rack previously, from the cache.
+  4. A ratio implied by the steering lock, which is known at spawn.
+  5. (whatever is left) CarParams' own value, by simply not appearing here.
+
+  Three and four are why a steer ratio being measured rather than declared is
+  not the problem it sounds like: a car is measured once, and until it is, the
+  fallback is its own steering lock rather than a Honda's rack.
 
   centerToFront is dropped if it does not sit inside the wheelbase it arrived
   with, because VehicleModel computes aR = wheelbase - centerToFront and a
   negative rear axle distance produces a silently inverted car.
   """
   out = {f: v for f, v in measured.items() if f in _ENV_OVERRIDES}
+
+  if "steerRatio" not in out:
+    lock = measured.get("steerLockDeg", 0.0)
+    remembered = cache.get(name, lock) if (cache is not None and lock) else None
+    seed = seed_steer_ratio(lock)
+    if remembered is not None:
+      out["steerRatio"] = remembered
+    elif seed is not None:
+      out["steerRatio"] = seed
+
   out.update(env_overrides())
   wheelbase = out.get("wheelbase")
   if wheelbase is not None and not (0.0 < out.get("centerToFront", -1.0) < wheelbase):
     out.pop("centerToFront", None)
   return out
+
+
+def steer_ratio_source(measured: dict[str, float], samples: int = 0, name: str = "",
+                       cache: "SteerRatioCache | None" = None) -> str:
+  """Where the steer ratio in use came from, for logs and the monitor."""
+  if "steerRatio" in env_overrides():
+    return "BEAMPILOT_STEER_RATIO"
+  if "steerRatio" in measured:
+    return f"measured ({samples} samples)"
+  lock = measured.get("steerLockDeg", 0.0)
+  if cache is not None and lock and cache.get(name, lock) is not None:
+    return "remembered from a previous drive"
+  if lock and seed_steer_ratio(lock) is not None:
+    return f"estimated from the {lock:.0f} deg steering lock -- turn the wheel to measure it"
+  return "the fingerprint's own value"
 
 
 class VehicleGeometryReceiver:

@@ -20,9 +20,10 @@ from openpilot.common.beampilot_bsm import (BSM_ENABLED, BlindSpotSender,
                                             flags_from_dash_lights, resolve)
 from openpilot.common.beampilot_bsm import lua_config as bsm_lua_config
 from openpilot.common.beampilot_radar import lua_config as radar_lua_config
-from openpilot.common.beampilot_vehicle import VehicleGeometryReceiver
+from openpilot.common.beampilot_vehicle import SteerRatioCache, VehicleGeometryReceiver
 from openpilot.common.beampilot_vehicle import lua_config as vehicle_lua_config
 from openpilot.common.beampilot_vehicle import resolve as resolve_geometry
+from openpilot.common.beampilot_vehicle import steer_ratio_source
 from openpilot.common.constants import CV
 from opendbc.car.structs import car
 from opendbc.car.vehicle_model import VehicleModel
@@ -406,6 +407,7 @@ class BeamNGBridge:
     # real lock once the mod reports it (unless it was pinned by hand).
     self.steer_lock_deg = MAX_STEERING_WHEEL_ANGLE_DEG
     self.steer_lock_warned = False
+    self.steer_ratio_source = "the fingerprint's own value"
 
     # Mirrors the Lua mod's own isControlling gating: only push a neutral
     # reset on the disengage EDGE, never on every not-engaged tick -- emitting
@@ -444,6 +446,11 @@ class BeamNGBridge:
     # VehicleModel then stays on CarParams exactly as it always did.
     self.geometry = VehicleGeometryReceiver.create()
     self.geometry_applied: dict[str, float] = {}
+    # A steer ratio has to be driven to be measured, so it is remembered: keyed
+    # on vehicle AND steering lock, because BeamNG's racks are parts rather than
+    # car properties. Until a vehicle has ever been measured the lock alone
+    # implies a far better ratio than a Honda's -- see beampilot_vehicle.py.
+    self.ratio_cache = SteerRatioCache()
     if self.geometry is None:
       print("[beamngd] BeamNG vehicle geometry off -- steering uses the"
             + " fingerprinted Civic's numbers", flush=True)
@@ -627,9 +634,21 @@ class BeamNGBridge:
     scaling error on every steering command, which is exactly the symptom this
     is here to remove.
     """
-    values = resolve_geometry(self.geometry.values)
+    measured = self.geometry.values
+    name, samples = self.geometry.name, self.geometry.samples
+    # Remember a good measurement before resolving, so this run's answer is the
+    # one that gets stored and the next spawn starts from it.
+    if "steerRatio" in measured and measured.get("steerLockDeg"):
+      if self.ratio_cache.put(name, measured["steerLockDeg"], measured["steerRatio"], samples):
+        print(f"[beamngd] remembered steerRatio {measured['steerRatio']:.2f} for"
+              + f" {name or 'this vehicle'} at {measured['steerLockDeg']:.0f} deg lock"
+              + f" -> {self.ratio_cache.path}", flush=True)
+
+    values = resolve_geometry(measured, samples=samples, name=name, cache=self.ratio_cache)
     if values != self.geometry_applied:
       self.geometry_applied = values
+      self.steer_ratio_source = steer_ratio_source(measured, samples=samples, name=name,
+                                                   cache=self.ratio_cache)
       self.refresh_vehicle_model(force=True)
 
     lock = self.geometry.values.get("steerLockDeg")
@@ -687,7 +706,8 @@ class BeamNGBridge:
           builder.mass, builder.wheelbase, builder.centerToFront, factor)
       self.static_steer_ratio = builder.steerRatio
       self.vehicle_model = VehicleModel(builder)
-      summary = (f"steerRatio={builder.steerRatio:.2f} wheelbase={builder.wheelbase:.2f}m"
+      summary = (f"steerRatio={builder.steerRatio:.2f} ({self.steer_ratio_source})"
+                 + f" wheelbase={builder.wheelbase:.2f}m"
                  + f" centerToFront={builder.centerToFront:.2f}m mass={builder.mass:.0f}kg"
                  + f" J={builder.rotationalInertia:.0f}")
     source = self.geometry.name if (self.geometry is not None and self.geometry.name) else None

@@ -235,11 +235,26 @@ def build_sections() -> list[Section]:
               + " followed -- geometry beats inference. Off freezes both at their static values.",
               "1", choices=["1", "0"]),
       Setting("BEAMPILOT_STEER_RATIO", "Steering ratio",
-              "How many degrees of steering wheel per degree of road wheel. Blank means measured:"
-              + " the mod fits it from the real steering wheel angle against the real road wheel"
-              + " angle, which needs you to have actually turned the wheel (20 deg by default)."
-              + " Set it to pin a value and ignore the measurement -- the Civic's is 15.38.",
+              "Degrees of steering wheel per degree of road wheel. Blank is right for almost"
+              + " everyone: the mod measures it once from the real wheel angle against the real"
+              + " road wheel angle, remembers it per vehicle and per rack, and until then"
+              + " estimates it from the car's steering lock. Setting it here pins ONE value for"
+              + " every vehicle and ignores all of that -- the Civic's is 15.38. To correct a"
+              + " single car instead, edit the remembered value in the cache file below.",
               "", numeric=True, step=0.5),
+      Setting("BEAMPILOT_SEED_STEER_RATIO", "Estimate the ratio from the lock",
+              "Before a vehicle has ever been measured, work its steering ratio out from its"
+              + " steering lock instead of using the Civic's 15.38. The lock is known the instant"
+              + " the car spawns and ranges from 270 to 900 degrees across BeamNG's vehicles,"
+              + " while the road wheel angle at full lock is set by the suspension and barely"
+              + " varies -- so the ratio is very nearly proportional to it. Off falls back to the"
+              + " fingerprint's value.",
+              "1", choices=["1", "0"]),
+      Setting("BEAMPILOT_STEER_RATIO_CACHE", "Remembered ratios",
+              "Where measured steering ratios are saved, keyed by vehicle AND steering lock"
+              + " (BeamNG's racks are parts, not car properties). Plain JSON, meant to be edited:"
+              + " if one car measured badly, fix its number here rather than pinning every car.",
+              "~/.config/beampilot/steer_ratios.json"),
       Setting("BEAMPILOT_WHEELBASE_M", "Wheelbase (m)",
               "Front axle to rear axle. Blank means measured. Set it to pin one; the Civic's is 2.70."
               + " Much less important than the steering ratio -- it mostly affects the"

@@ -175,6 +175,25 @@ export BEAMPILOT_CAM_WINDOW="beamng"
 # export BEAMPILOT_GEOMETRY_MIN_STEER_DEG="20.0"
 # export BEAMPILOT_GEOMETRY_MIN_WHEEL_DEG="0.3"
 
+# ...and it only has to be measured ONCE. Every good measurement is remembered
+# here, keyed on vehicle AND steering lock -- BeamNG's racks are parts, not car
+# properties (an ETK 800 ships 275, 360, 400, 450 and 510 degree locks), so a
+# per-car table would be wrong the first time you fit a different one. Plain
+# JSON, meant to be read and hand-edited: correcting a vehicle that measured
+# badly is the point.
+# export BEAMPILOT_STEER_RATIO_CACHE="$HOME/.config/beampilot/steer_ratios.json"
+# export BEAMPILOT_STEER_RATIO_CACHE_MIN_SAMPLES="200"
+
+# Before a vehicle has ever been measured, the ratio is estimated from its
+# steering LOCK rather than left at the Civic's 15.38. Within a vehicle the
+# steering hydro barely changes between rack options, so the road wheel angle at
+# full lock is set by the suspension and is roughly fixed -- which makes the
+# ratio very nearly proportional to the lock, and the lock is read out of the
+# jbeam the moment the car spawns. A 900-degree bus and a 275-degree race rack
+# then are not both assumed to be a Honda.
+# export BEAMPILOT_SEED_STEER_RATIO="0"            # 0 = use the fingerprint's instead
+# export BEAMPILOT_TYPICAL_MAX_WHEEL_ANGLE_DEG="33.0"   # the assumed denominator
+
 # Manual overrides. Any of these that is set WINS over both the mod's
 # measurement and CarParams -- use them to pin a number you do not trust, or to
 # get the old hand-tuned behaviour back. Unset = measured, else the Civic's.

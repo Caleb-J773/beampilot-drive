@@ -324,6 +324,13 @@ These were each a real bug that cost significant debugging time. Don't regress t
   rather than left free to follow `alpha_long`.
 - **There is no `obj:getTotalMass()`.** Mass is `sum(node.nodeWeight)` over `v.data.nodes`, which
   is also where the centre of gravity and the yaw inertia come from.
+- **BeamNG's steering lock is a PART, not a car property.** An ETK 800 ships locks of 275, 360,
+  400, 450 and 510 degrees; the range across all vehicles is 270 (Scintilla race rack) to 900
+  (Citybus). So anything keyed on the vehicle name alone is wrong the moment a different rack is
+  fitted -- the steer-ratio cache keys on `name|round(lock)` for exactly this reason. Within a
+  vehicle the hydro `factor` barely moves across rack options (Covet `0.098` for locks 400-540),
+  so road wheel angle at full lock is suspension-limited and roughly fixed, which is what makes
+  `ratio ~= lock / 33` a usable seed before anything is measured.
 - **BeamNG has no steering-ratio field** -- a rack ratio is emergent from the steering geometry,
   not declared. Measure it: `obj:nodeVecPlanarCosRightForward(wheel.node1, wheel.node2)` gives the
   road wheel angle (this is how `esc.lua` gets `wheelAngleFront`), fit that against

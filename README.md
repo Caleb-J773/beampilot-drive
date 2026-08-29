@@ -541,9 +541,50 @@ The mod now measures all of it from the spawned vehicle and sends it over UDP 49
 | `steerLockDeg` | `v.data.input.steeringWheelLock`, straight out of the jbeam |
 | `steerRatio` | **Measured while you drive**: the real steering wheel angle fitted against the real road wheel angle (`obj:nodeVecPlanarCosRightForward`, averaged across both front wheels so Ackermann and toe-in cancel) |
 
-The steer ratio needs the wheel actually turned to be measurable, so it stays unreported until you
-have steered a real amount — 20° at the wheel by default. **Turning lock to lock once before
-engaging measures it instantly.** Until then, the Civic's ratio is used, exactly as before.
+#### Why the steer ratio is measured rather than looked up
+
+BeamNG has no steering-ratio field, because a rack ratio is emergent from the steering geometry
+rather than declared. What *is* declared is the steering **lock**, and it is not a per-car
+constant — it is a property of the rack **part**:
+
+| | steering locks shipped |
+|---|---|
+| ETK 800-Series | 275 · 360 · 400 · 450 · 510 |
+| Autobello Piccolina | 360 · 450 · 570 · 720 |
+| Ibishu Covet | 360 · 400 · 450 · 480 · 540 |
+| Wentward DT40L (bus) | 900 |
+| Civica Scintilla | 414 |
+
+So a lookup table keyed on the car would be wrong the first time you fit a different rack. Two
+things make measuring it a non-problem instead:
+
+**It only has to be measured once.** Every good measurement is remembered in
+`~/.config/beampilot/steer_ratios.json`, keyed by vehicle *and* lock. From the next spawn onward
+that car is right immediately. It is plain JSON and meant to be edited — if one vehicle measured
+badly, correct its number there rather than pinning `BEAMPILOT_STEER_RATIO` for everything.
+
+**Until then it is estimated, not guessed.** Within a vehicle the steering hydro's displacement
+barely changes between rack options (a Covet is `0.098` for every lock from 400 to 540), so the
+road wheel angle at full lock is set by the suspension and is roughly fixed. That makes the ratio
+very nearly proportional to the lock — and the lock is read out of the jbeam the instant the car
+spawns:
+
+| Vehicle | Lock | Estimated ratio | The old Civic assumption |
+|---|---|---|---|
+| ETK 800 (race rack) | 275° | 8.3 | 15.38 |
+| Ibishu Covet | 450° | 13.6 | 15.38 |
+| Autobello | 720° | 21.8 | 15.38 |
+| Citybus | 900° | 27.3 | 15.38 |
+
+`beamngd` prints which of these it is using on every rebuild, so you are never guessing:
+
+```
+[beamngd] VehicleModel for Ibishu Covet: steerRatio=13.64 (estimated from the 450 deg
+          steering lock -- turn the wheel to measure it) wheelbase=2.34m ...
+```
+
+**Turning lock to lock once before engaging measures it properly and stores it**, and after that
+the car is simply right.
 
 Tyre stiffness is re-derived at the new geometry rather than left at the Civic's: opendbc computes
 it from mass and weight distribution (`scale_tire_stiffness`), and it is the front/rear stiffness
