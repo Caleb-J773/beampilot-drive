@@ -89,6 +89,9 @@ def pack_nv12_padded(nv12_bytes: bytes, w: int, h: int, stride: int, y_height: i
 
 
 def main():
+  # openpilot's model input resolution. Not a capture setting -- the captured
+  # region is rescaled to this regardless of your monitor size, and modeld
+  # expects exactly these dimensions, so don't change them to "match" a display.
   W, H = 1928, 1208
 
   server = VisionIpcServer("camerad")
@@ -132,6 +135,17 @@ def main():
     # it's just never exercised there since that driver is disabled here).
     timestamp = time.monotonic_ns()
 
+    # KNOWN LIMITATION: the same frame goes to BOTH streams, so openpilot's
+    # "wide" camera is really a second copy of the narrow view. modeld sets
+    # has_wide_camera = use_extra_client or main_wide_camera (modeld.py), which
+    # is True here, so it applies dc.wide_road.intrinsics -- the calibration for
+    # a ~120 degree lens -- to an image that doesn't have that field of view.
+    # The model therefore misjudges how far objects and lane lines sit off to
+    # the sides, which shows up most in turns, where the real wide camera is
+    # what normally sees around the corner. Keep Experimental mode OFF: its
+    # end-to-end longitudinal policy leans much harder on wide-camera scene
+    # understanding. Fixing this properly needs a second BeamNG camera at a
+    # genuinely wide FOV published to VISION_STREAM_WIDE_ROAD.
     server.send(VisionStreamType.VISION_STREAM_WIDE_ROAD, nv12_bytes, frame_id, timestamp, timestamp)
     server.send(VisionStreamType.VISION_STREAM_NARROW_ROAD, nv12_bytes, frame_id, timestamp, timestamp)
 

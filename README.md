@@ -1,101 +1,81 @@
 # beampilot-drive
 
-**Run [openpilot](https://github.com/commaai/openpilot) — comma.ai's open source driver
-assistance system — inside [BeamNG.drive](https://www.beamng.com/game/), the consumer Steam
-game.**
+openpilot, driving a car in BeamNG.drive.
 
-openpilot sees the road through a screen capture of the game window, runs its real driving
-model on those frames, and steers, accelerates and brakes the car through a BeamNG mod. Every
-part of openpilot's stack is the genuine article — the same `modeld`, `controlsd`, `plannerd`
-and `locationd` that run on real hardware. Only the sensors and actuators are swapped.
+This is a fork of [openpilot](https://github.com/commaai/openpilot) that replaces the camera and
+CAN bus with a screen capture of BeamNG.drive and a small Lua mod. The driving stack itself is
+untouched: the same `modeld`, `controlsd`, `plannerd` and `locationd` that run on comma hardware
+run here, and they have no idea they're looking at a video game.
 
-> **No BeamNG.tech required.** This works with the ordinary Steam version of BeamNG.drive.
-> There is no dependency on `beamngpy` (which needs the paid research-licensed BeamNG.tech):
-> telemetry and control both go through a small Lua mod that uses BeamNG's own public modding
-> hooks.
+It works with the normal Steam version of the game. You don't need BeamNG.tech, and there's no
+`beamngpy` dependency — telemetry and control both go through BeamNG's ordinary modding hooks.
 
----
+## What works
 
-## Status
+It steers, holds a set speed, brakes for traffic, and changes lanes when you signal.
 
-Working, and it drives. Verified live:
+It's not polished. The steering geometry is still calibrated for a Honda Civic rather than
+whatever car you spawn, there's no real wide-angle camera, and it will happily drive into things
+if you let it. See [Known problems](#known-problems).
 
-- Steers along the road, tracking curves
-- Holds a set cruise speed, accelerates and brakes on its own
-- Changes lanes on the turn signal
-- Follows and brakes for traffic
+## Setup
 
-Known rough edges are tracked in [Known issues](#known-issues).
-
----
-
-## Quick start
-
-Five steps, assuming you already own and have launched BeamNG.drive once.
+You'll need Linux, BeamNG.drive on Steam, and a GPU that tinygrad supports. The GPU renders the
+game and runs the driving model at the same time, so a weaker card shows up as dropped frames
+before anything else.
 
 ```bash
-# 1. clone
 git clone --recurse-submodules https://github.com/Caleb-J773/beampilot-drive.git
 cd beampilot-drive
-
-# 2. build (also installs the BeamNG mod)
 ./setup_beampilot.sh
+```
 
-# 3. start BeamNG.drive and spawn a car (freeroam is fine)
+That builds openpilot and symlinks the BeamNG mod into your userfolder. Run BeamNG at least once
+first so the folder exists.
 
-# 4. launch openpilot -- you get a 5s countdown to tab back into the game
-source .venv/bin/activate.fish     # bash/zsh: source .venv/bin/activate
+There's a config tool if you'd rather not edit shell variables by hand:
+
+```bash
+uv run python tools/beampilot_tui.py
+```
+
+It detects your GPUs, explains what each setting does, and writes to `config_beampilot.sh`. That
+file is still the source of truth, so editing it directly works fine too — the tool reads
+whatever you've written and preserves your comments.
+
+## Running it
+
+Start BeamNG, spawn a car, then:
+
+```bash
+source .venv/bin/activate.fish   # bash/zsh: source .venv/bin/activate
 ./launch_beampilot.sh
 ```
 
-Then, **in the BeamNG window**, get the car rolling above ~20 mph and press **`i`** to engage.
+You get a five second countdown to alt-tab back into the game. Get above about 20 mph and press
+`i`.
 
-### Controls
-
-| Key | Action |
+| Key | |
 |---|---|
-| `i` | Set cruise speed / engage (nudges speed down when already engaged) |
-| `o` | Resume / increase speed |
-| `u` | Cancel — hands control back to you |
-| `,` | Left turn signal → openpilot changes lanes left |
-| `.` | Right turn signal → openpilot changes lanes right |
+| `i` | Set speed and engage. Nudges the speed down if already engaged. |
+| `o` | Resume, or speed up. |
+| `u` | Cancel. |
+| `,` `.` | Turn signals. Signal while engaged and it changes lanes. |
 
-Cruise keys are read from the keyboard device directly (via `evdev`), because BeamNG holds
-window focus while you drive. They are `i`/`o`/`u` rather than the more obvious `c`/`v`/`b`
-because those collide with BeamNG's own defaults (`c` cycles the camera).
+These are read straight from the keyboard device, because BeamNG has window focus while you're
+driving. They're `i`/`o`/`u` instead of something more memorable because most of the good keys
+are already bound in BeamNG (`c` cycles the camera). You can rebind them in the config.
 
-Lane changes need >20 mph and openpilot engaged.
-
-### Watch what it's doing
-
-In a second terminal:
+To see what it's thinking:
 
 ```bash
 uv run python tools/beampilot_monitor.py
 ```
 
-A live view of every channel's rate, what openpilot thinks the car is doing (`carState`), what
-it's commanding, what the driving model predicts, and whether the turn limits are actually
-binding. This is the first thing to run when something looks wrong.
-
-`tools/beampilot_diag.py` is a one-shot version that also checks the raw UDP link from the mod.
-
----
-
-## Requirements
-
-* **Linux.** Tested on Arch; Ubuntu should be fine. (openpilot itself is Linux-only.)
-* **BeamNG.drive** on Steam — the native Linux build, no Proton needed.
-* **A GPU with a working [tinygrad](https://tinygrad.org) backend** (NVIDIA or AMD), which will
-  be running the driving model *at the same time as* the game renders. A single mid-range card
-  can do both, but expect the model to be the thing that suffers first.
-* 4 GB VRAM / 16 GB RAM for standard models; 8 GB / 32 GB for chestnut-class.
-* Membership in the `input` group (for reading the keyboard, and for `/dev/uinput` if you use
-  the virtual-wheel control mode).
-
-These are conservative, not hard-tested limits.
-
----
+Live rates for every message channel, what openpilot believes the car is doing, what it's
+commanding, and whether the turn limits are actually constraining it. Start here when something
+looks wrong. `tools/beampilot_diag.py` is a one-shot version that also checks the raw UDP link
+from the mod.
 
 ## How it works
 
@@ -113,210 +93,172 @@ screen ──► beamcamd ──► VisionIPC ────────┼─┼�
                                               controlsState.desiredCurvature
 ```
 
-**The steering path, end to end:**
+`beamcamd` grabs the game window and publishes it as camera frames. `modeld` predicts a path
+from those frames. `controlsd` turns that into a desired curvature. `beamngd` converts curvature
+into a steering angle using opendbc's vehicle model, scales it to BeamNG's input range, and
+sends it over UDP. The Lua mod applies it with `input.event()`, which is the same function
+BeamNG's own AI driver uses.
 
-1. `beamcamd` captures the BeamNG window (via `mss`), converts to NV12, publishes at 20 Hz
-2. `modeld` — stock openpilot — runs the driving model and predicts a path
-3. `plannerd`/`controlsd` — stock — turn that into a desired curvature (1/m)
-4. `beamngd` converts curvature → steering wheel angle using opendbc's `VehicleModel`, maps it
-   to BeamNG's `-1..1` input range, and sends it as JSON over UDP
-5. The Lua mod applies it with `input.event("steering", v, FILTER_DIRECT)` — the same hook
-   BeamNG's own AI driver uses
+CAN only goes one direction. `beamngd` fabricates Honda Civic CAN frames from BeamNG telemetry
+so openpilot thinks it's plugged into a real car. Nothing is ever sent back to the game over CAN.
 
-CAN traffic only flows *into* openpilot. `beamngd` synthesises Honda Civic 2022 CAN frames from
-BeamNG telemetry so openpilot believes it's plugged into a real car; nothing is ever sent back
-over CAN to the game.
+BeamNG runs any `.lua` file you drop in a mod's `lua/vehicle/protocols/` folder on every physics
+tick, which is how the stock OutGauge and MotionSim protocols work. That gives direct access to
+`electrics.values.*` for telemetry and `input.event()` for control, without binding anything
+in-game or creating a fake input device.
 
-### Why a Lua mod instead of a virtual gamepad
-
-BeamNG auto-discovers any `.lua` file in a mod's `lua/vehicle/protocols/` folder and calls it
-every physics tick — the same mechanism its stock `outgauge`/`motionSim` protocols use. That
-gives direct access to `electrics.values.*` for telemetry and `input.event()` for control,
-with no in-game binding and no OS-level fake device.
-
-A `uinput` virtual wheel is also implemented as an alternative (`BEAMPILOT_CONTROL_MODE=joystick`),
-mainly because [jackz314's ETS2/ATS bridge](https://github.com/jackz314/openpilot/tree/master/tools/truck_sim)
-has to work that way — ETS2 has no scriptable input hook. BeamNG does, so the Lua path is
-default and better.
-
----
+There's also a `uinput` virtual wheel (`BEAMPILOT_CONTROL_MODE=joystick`) that exists mostly
+because [jackz314's ETS2 bridge](https://github.com/jackz314/openpilot/tree/master/tools/truck_sim)
+has to work that way — ETS2 has no scripting hook. BeamNG does, so the Lua path is the default
+and the better one.
 
 ## Configuration
 
-Everything lives in **`config_beampilot.sh`**, which both scripts source.
+Everything lives in `config_beampilot.sh`. Every beampilot setting falls back to the stock
+openpilot value when unset, so deleting a line gets you unmodified behaviour rather than a crash.
 
-### Car and hardware
+### Hardware
 
-| Setting | Default | Notes |
+`USE_NV` or `USE_AMD` picks the GPU backend — set one. `CHESTNUT=1` selects the larger model
+(8 GB VRAM instead of 4). `BIG` is the window resolution: `1` is the comma 3/3X screen at
+2160x1080, `0` is the comma 4 at 536x240, which is unreadably small on a desktop. `SCALE`
+multiplies that, so `0.6` gets you about 1296x648.
+
+### Driving limits
+
+Stock openpilot follows EU and ISO passenger comfort guidelines. In a simulator those are
+usually the reason it won't take a corner:
+
+| | Stock | |
 |---|---|---|
-| `FINGERPRINT` | `HONDA_CIVIC_2022` | The car openpilot believes it's driving. **Changing this breaks `beamngd`** — CAN message layouts are per-car. |
-| `SKIP_FW_QUERY` | `1` | Skip firmware fingerprinting. Must stay `1`. |
-| `USE_NV` / `USE_AMD` | `USE_NV=1` | Pick one for your GPU. |
-| `BIG` | `1` | Screen size: `1` = comma 3/3X (2160x1080), `0` = comma 4 (536x240, tiny). Not a scale knob — use `SCALE` for that. |
-| `CHESTNUT` | `0` | Chestnut-class (eGPU) models. Needs 8 GB+ VRAM. |
+| `BEAMPILOT_MAX_LAT_ACCEL` | 3.0 m/s² | Turning. Maximum curvature is `accel / v²`, so stock only allows about a 300 m radius at 67 mph. |
+| `BEAMPILOT_MAX_LAT_JERK` | 5.0 m/s³ | How fast curvature can change. Raise this carefully; it's the usual cause of weaving. |
+| `BEAMPILOT_MAX_CURVATURE` | 0.2 1/m | Geometric cap. Only matters below about 11 mph. |
+| `BEAMPILOT_ACCEL_SCALE` | 1.0 | Multiplier on the acceleration envelope. |
+| `BEAMPILOT_DECEL_SCALE` | 1.0 | Same for braking. |
+| `BEAMPILOT_PERSONALITY` | 1 | Following distance. 0 is aggressive (1.25 s), 2 is relaxed (1.75 s). |
 
-### Driving behaviour
+Raising a limit doesn't make openpilot want to turn harder, it just stops clipping it when it
+does. The monitor tells you whether a limit is actually binding, which is worth checking before
+you tune anything.
 
-Stock openpilot follows EU/ISO passenger-comfort limits, which in a simulator are usually the
-reason it won't take a corner or get up to speed. Each of these **defaults to the stock
-upstream value if unset**, so commenting a line out restores unmodified openpilot.
+### Vehicle
 
-| Setting | Stock | Effect |
-|---|---|---|
-| `BEAMPILOT_MAX_LAT_ACCEL` | `3.0` m/s² | Turning. Max curvature is `accel / v²` — stock allows only a ~300 m radius at 67 mph. |
-| `BEAMPILOT_MAX_LAT_JERK` | `5.0` m/s³ | How fast curvature may change. **Raise cautiously — the likeliest cause of weaving.** |
-| `BEAMPILOT_MAX_CURVATURE` | `0.2` 1/m | Geometric cap; only binds below ~11 mph. |
-| `BEAMPILOT_ACCEL_SCALE` | `1.0` | Multiplier on the whole acceleration envelope. |
-| `BEAMPILOT_DECEL_SCALE` | `1.0` | Same, for braking. |
-| `BEAMPILOT_PERSONALITY` | `1` | Following distance: `0` aggressive (1.25 s), `1` standard (1.45 s), `2` relaxed (1.75 s). |
+`BEAMPILOT_STEER_LOCK_DEG` (default 510) is your BeamNG car's steering lock. Hold full lock and
+read `steering_wheel_deg` in the monitor to find yours. Too low and openpilot oversteers, too
+high and it runs wide. `BEAMPILOT_STEER_SWEEP_SECONDS` controls how quickly it chases a steering
+target; lower is snappier and twitchier.
 
-These are *permission* limits, not commands — raising them lets openpilot turn harder, it
-doesn't make it want to. The monitor tells you whether a limit is actually binding.
+`FINGERPRINT` is the car openpilot thinks it's driving. Changing it breaks `beamngd`, which
+packs Honda Bosch CAN specifically.
 
-### Simulator conveniences
+### Alerts
 
-| Setting | Effect |
-|---|---|
-| `BEAMPILOT_AUTO_LANE_CHANGE` | Commit a lane change from the blinker alone. Required here — stock also wants a steering-wheel nudge, which can't happen with no wheel. |
-| `BEAMPILOT_IGNORE_COMM_ISSUE` | Stop inter-process timing hiccups from disengaging. **Behavioural, not cosmetic** — see [Safety](#safety). |
-| `BEAMPILOT_CONTROL_MODE` | `lua` (default) or `joystick`. |
-| `BEAMPILOT_CAM_MONITOR` | Which monitor to capture (default `1`). |
-| `BEAMPILOT_CAM_REGION` | `left,top,width,height`, for a windowed BeamNG. |
-| `BLOCK` | Comma-separated processes not to start. Includes `soundd` by default to mute alert chimes. |
+`BEAMPILOT_IGNORE_COMM_ISSUE` stops inter-process timing hiccups from disengaging. Unlike the
+alerts suppressed under `SIMULATION`, this one changes behaviour rather than just what's on
+screen: if `modeld` stalls, openpilot keeps steering on stale output instead of handing back
+control. The event still gets logged.
 
----
+`BLOCK` is a comma-separated list of processes not to start. `soundd` is in there by default,
+which mutes the alert chimes.
 
-## What's different from [ko6lvm/beampilot](https://github.com/ko6lvm/beampilot)
+## Known problems
 
-This fork started from Ryan's beampilot, which laid out the architecture — the process list,
-the `beamngd`/`beamcamd` split, the config/launch scripts, and the goal of a BeamNG bridge.
-At that point both daemons were stubs: `beamngd` published zeroed CAN/IMU/GPS and `beamcamd`
-published a black frame, both marked *"currently inop"*.
+**No wide-angle camera.** openpilot expects two cameras, a narrow one and a roughly 120° wide
+one. `beamcamd` only has the one game view, so it publishes the same frame to both streams.
+`modeld` sees a wide camera is present and applies the wide lens calibration
+(`dc.wide_road.intrinsics`) to an image that doesn't have that field of view, so it misjudges
+how far things sit off to the sides. This shows up worst in turns, since the wide camera is
+normally what sees around a corner.
 
-**~1,650 lines changed across 22 files.** The substance:
+**Keep Experimental mode off** for the same reason. Its end-to-end longitudinal policy leans
+much harder on wide-camera scene understanding, and it behaves noticeably worse here. Fixing
+this properly means adding a second BeamNG camera at a genuinely wide FOV.
 
-### Made it actually drive
+**Steering geometry mismatch.** openpilot computes a steering angle using the Civic's steer
+ratio of 15.38 and wheelbase of 2.7 m. Your BeamNG car has neither. Only the steering lock has
+been measured and made configurable, so commanded curvature and achieved curvature still don't
+quite match, and the car runs wide. Calibrating the mapping against measured yaw rate is the
+real fix.
 
-* **`beamngd` rewritten** from a zeroed stub into a real bridge: parses live telemetry from the
-  mod, synthesises Honda CAN, reads cruise buttons from the keyboard via `evdev`, and converts
-  openpilot's desired curvature into BeamNG steering using opendbc's `VehicleModel`.
-* **`beamcamd` rewritten** from a black-frame generator into a real screen-capture pipeline
-  (`mss` + OpenCV NV12 conversion), meeting the 20 Hz target (from 15.3 Hz before optimisation).
-* **New BeamNG mod** (`tools/beamng_mod/beampilot_bridge`) — a Lua protocol that streams
-  telemetry out and applies openpilot's control via `input.event()`.
-* **`abeamngd.py` deleted** — dead code that depended on the unavailable `beamngpy`.
+**Other things.** `carState.vCruise` reports a nonsense set speed while `cruiseState.speed` is
+correct. `beamcamd` drops around 6% of frames. Driver monitoring channels publish at 33 Hz where
+20 is expected. Under GPU load `locationd` produces bursts of `observation too old`.
 
-### Bugs that were blocking it
+## Differences from [ko6lvm/beampilot](https://github.com/ko6lvm/beampilot)
 
-* **Camera calibration never converged.** `calibrationd` needs minutes of sustained straight
-  highway driving before it trusts its extrinsics; until then the model's road-frame transform
-  is wrong, which shows up as steering bias — not as an obvious error. Now seeded at launch.
-* **Publish rates were badly wrong.** Measured: `gpsLocationExternal` at **1000 Hz (100× over
-  spec)**, IMU at 5×, `pandaStates` 5× too slow. `SimulatedSensors`' burst helpers are sized
-  for a ~20 Hz caller and `beamngd` ticks at 100 Hz. Wrong rates trigger `commIssue`, which
-  both blocks engagement *and* disengages mid-drive.
-* **Cruise speed was always zero.** This car is Bosch, so the set speed comes from
-  `ACC_HUD.CRUISE_SPEED` on the camera bus — not `CRUISE.CRUISE_SPEED_PCM`, which is only read
-  for non-Bosch Hondas.
-* **openpilot wasn't doing longitudinal control at all.** Without `AlphaLongitudinalEnabled`,
-  honda's interface leaves `pcmCruise=True` — openpilot steers but expects *the car's own ACC*
-  to manage speed. BeamNG has no ACC, so nothing ever accelerated.
-* **A throttle feedback loop disengaged it instantly.** BeamNG's throttle reading, while
-  engaged, is openpilot's own command echoed back. Reporting it as the *driver's* pedal made
-  `gasPressed` true and tripped the pedal-override disengage the moment it tried to accelerate.
-* **Fake camera timestamps** made `locationd` reject every frame. (This same bug exists,
-  unfixed, in openpilot's own `webcam/camerad.py` — it's just never exercised there.)
-* **Controls Mismatch** — `pandaStates` hardcoded safety flags instead of mirroring the real
-  `carParams.safetyConfigs`.
+Ryan's beampilot set up the architecture this builds on: the process list, the `beamngd` and
+`beamcamd` split, the config and launch scripts, and the plan for a BeamNG bridge. Both daemons
+were stubs at that point, marked "currently inop" — `beamngd` published zeroed CAN and
+`beamcamd` published a black frame.
 
-### Added
+About 1,650 lines changed across 22 files. The substantial parts:
 
-* **Lane changes** — signal-only, since there's no wheel to nudge.
-* **Tunable driving limits** — the table above; all default to stock.
-* **Diagnostics** — `tools/beampilot_monitor.py` (live) and `tools/beampilot_diag.py`.
-* **`CLAUDE.md`** — architecture notes and a hard-won-gotchas list, so the debugging above
-  doesn't have to be repeated.
-* **Alert suppression** for simulator noise, gated so real-car behaviour is unchanged.
+Both daemons were rewritten. `beamngd` now parses live telemetry, synthesises Honda CAN, reads
+cruise buttons over evdev, and converts openpilot's desired curvature into BeamNG steering using
+opendbc's `VehicleModel`. `beamcamd` became a real capture pipeline using mss and OpenCV, fast
+enough for its 20 Hz target (it was managing 15.3 Hz before optimisation). The BeamNG mod is new.
+`abeamngd.py` was deleted, since it depended on the unavailable `beamngpy`.
 
----
+Several things were quietly broken and had to be found:
 
-## Known issues
+- `calibrationd` never converged, because it needs minutes of straight highway driving before it
+  trusts its extrinsics. Until then the model's road frame is wrong, which looks like steering
+  bias rather than an error. Now seeded at launch.
+- Message rates were badly off. GPS was publishing at 1000 Hz against an expected 10, the IMU at
+  5x, and `pandaStates` 5x too slow. `SimulatedSensors` emits bursts sized for a 20 Hz caller and
+  `beamngd` ticks at 100. Bad rates trigger `commIssue`, which blocks engagement and disengages
+  mid-drive.
+- Cruise speed was always zero. This car is Bosch, so the set speed comes from
+  `ACC_HUD.CRUISE_SPEED` on the camera bus, not `CRUISE.CRUISE_SPEED_PCM`.
+- openpilot wasn't doing longitudinal control at all. Without `AlphaLongitudinalEnabled`, Honda's
+  interface leaves `pcmCruise=True`, which means openpilot steers and waits for the car's own ACC
+  to handle speed. BeamNG doesn't have one.
+- BeamNG's throttle reading, while engaged, is openpilot's own command coming back. Reporting it
+  as the driver's pedal made `gasPressed` true and tripped the pedal-override disengage the
+  instant it tried to accelerate.
+- Camera frames used a synthetic timestamp counter, so `locationd` rejected every one. The same
+  bug is still in openpilot's own `webcam/camerad.py`; it just never runs there.
+- `pandaStates` hardcoded safety flags instead of mirroring `carParams.safetyConfigs`, which
+  produced a permanent Controls Mismatch.
 
-* `carState.vCruise` reports an implausible set speed (~240 mph) while `cruiseState.speed` is
-  correct.
-* **Steering geometry mismatch.** openpilot computes wheel angle from the *Civic's* steer ratio
-  (15.38) and wheelbase (2.700 m), but the BeamNG vehicle has its own geometry — only its 510°
-  steering lock has been measured. When commanded curvature isn't achieved, the car runs wide.
-  The proper fix is to calibrate the mapping against measured yaw rate.
-* `beamcamd` drops ~6% of frames; driver-monitoring channels publish at 33 Hz vs 20 expected.
-* Model performance depends on the GPU also rendering the game — expect occasional
-  `observation too old` bursts from `locationd` under load.
+Added since: signal-only lane changes, the tunable limits above, `tools/beampilot_tui.py` and
+the two diagnostic tools, and `CLAUDE.md` with architecture notes and the list of things that
+are non-obvious enough to be worth writing down.
 
----
+## Process changes
+
+Removed, being hardware-specific or pointless on a desktop: `camerad`, `webcamerad`, `sensord`,
+`pandad`, `_pandad`, `micd`, `dmonitoringmodeld`, `dmonitoringd`, `updated`, `qcomgpsd`,
+`ubloxd`, `pigeond`, `modem`.
+
+Added: `beamngd` for telemetry, fake sensors and control at 100 Hz, and `beamcamd` for camera
+frames at 20 Hz.
+
+Everything else is stock.
 
 ## Safety
 
-**This is for simulation only.** Driver monitoring (`dmonitoringmodeld`/`dmonitoringd`) is
-removed, and several safety alerts are suppressed under `SIMULATION`. Disabling driver
-monitoring in a real vehicle is dangerous and violates comma's requirements. Do not put this
-on a car.
-
-One flag deserves specific attention: `BEAMPILOT_IGNORE_COMM_ISSUE` stops inter-process
-communication failures from disengaging openpilot. That is not cosmetic — if `modeld` stalls
-or dies, openpilot will keep steering on stale model output instead of handing back control.
-It's opt-in and deliberately separate from the display-only suppressions. The underlying event
-is still logged.
-
----
-
-## Process changes vs. stock openpilot
-
-**Removed** — hardware-specific or unnecessary on a desktop:
-`camerad`, `webcamerad` (→ `beamcamd`) · `sensord`, `pandad`, `_pandad` (→ `beamngd`) ·
-`micd` · `dmonitoringmodeld`, `dmonitoringd` · `updated` · `qcomgpsd`, `ubloxd`, `pigeond` ·
-`modem`
-
-**Added:**
-* `beamngd` — telemetry, fake CAN/IMU/GPS, and control output (100 Hz)
-* `beamcamd` — screen capture → camera frames (20 Hz)
-
-Everything else — `modeld`, `controlsd`, `selfdrived`, `plannerd`, `locationd`, `calibrationd`,
-`torqued`, `paramsd`, `radard`, `card`, `ui` — is stock openpilot, unmodified.
-
----
+Simulation only. Driver monitoring is removed and several alerts are suppressed. Disabling
+driver monitoring in a real car is dangerous and against comma's terms. Don't put this in a
+vehicle.
 
 ## Development
 
-Architecture notes, the full gotcha list, and debugging guidance live in
-[`CLAUDE.md`](CLAUDE.md). Read it before changing `beamngd`, `beamcamd`, or the Lua mod — most
-of the non-obvious constraints are written down there.
+`CLAUDE.md` has the architecture notes and a list of gotchas worth reading before touching
+`beamngd`, `beamcamd` or the Lua mod. Most of the non-obvious constraints are written down there
+so they don't have to be rediscovered.
 
-Mod edits under `tools/beamng_mod/` apply live; reload with **Ctrl+L** in game.
+Mod edits under `tools/beamng_mod/` apply live — reload with Ctrl+L in game.
 
 ```bash
-# lint
 uv run ruff check .
-
-# individual processes
-source .venv/bin/activate
-openpilot/selfdrive/modeld/modeld.py
-openpilot/tools/replay/replay --demo -b modelV2,drivingModelData,cameraOdometry
-BIG=1 openpilot/selfdrive/ui/ui.py
 ```
-
----
 
 ## Credits
 
-* **[commaai/openpilot](https://github.com/commaai/openpilot)** — the driver assistance system
-  this is built on. MIT licensed; see [LICENSE](LICENSE).
-* **[ko6lvm/beampilot](https://github.com/ko6lvm/beampilot)** — Ryan's original beampilot fork,
-  which established the architecture and process layout this builds directly on.
-* **[jackz314/openpilot](https://github.com/jackz314/openpilot)** — the ETS2/ATS `truck_sim`
-  bridge, useful prior art for structure (built on openpilot 0.8.6).
-* **[BeamNG.drive](https://www.beamng.com/game/)** — for exposing enough to modders that this
-  was possible without the research licence.
-
-## License
+Built on [openpilot](https://github.com/commaai/openpilot) by comma.ai, MIT licensed.
+Forked from [ko6lvm/beampilot](https://github.com/ko6lvm/beampilot).
+[jackz314/openpilot](https://github.com/jackz314/openpilot)'s ETS2 bridge was useful prior art.
 
 MIT, inherited from openpilot. See [LICENSE](LICENSE).

@@ -150,6 +150,24 @@ These were each a real bug that cost significant debugging time. Don't regress t
   in BeamNG's Options > Controls. Built as a fallback, currently unused. This is the approach
   jackz314's ETS2/ATS bridge uses, because ETS2 has no scriptable input hook — BeamNG does.
 
+## The wide camera problem
+
+openpilot expects two road cameras: a narrow one and a ~120° wide one. `beamcamd` has only the
+single BeamNG view, so it publishes **the same frame to both streams**. `modeld` computes
+`has_wide_camera = use_extra_client or main_wide_camera`, which is `True` here, so it applies
+`dc.wide_road.intrinsics` — the calibration for a wide lens — to an image that does not have
+that field of view.
+
+Consequences:
+- The model misjudges how far objects and lane lines sit laterally, worst **in turns**, where
+  the real wide camera is what sees around the corner.
+- **Keep Experimental mode OFF.** Its end-to-end longitudinal policy leans much harder on
+  wide-camera scene understanding and degrades noticeably here.
+
+Proper fix: a second BeamNG camera at a genuinely wide FOV, published to
+`VISION_STREAM_WIDE_ROAD` separately. The `openpilot_cam` mod already shows how to register a
+rigidly-mounted, FOV-matched camera; a second one plus a second capture region would do it.
+
 ## Known outstanding issues
 
 - `carState.vCruise` reads ~108 (241 mph) while `cruiseState.speed` is correct — set-speed

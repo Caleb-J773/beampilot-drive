@@ -32,6 +32,21 @@ export BEAMPILOT_ACCEL_SCALE="2.0"      # 1.0 = stock (1.6 m/s^2 from a stop)
 export BEAMPILOT_DECEL_SCALE="1.5"      # 1.0 = stock (-1.2 m/s^2 cruise braking)
 # ---------------------------------------------------------------------------
 
+# Your BeamNG vehicle's steering lock, in degrees. Per-vehicle: hold full lock
+# and read steering_wheel_deg in tools/beampilot_monitor.py to find yours.
+# Too low makes openpilot oversteer, too high makes it run wide.
+export BEAMPILOT_STEER_LOCK_DEG="510.0"
+
+# Lock-to-lock sweep time. Lower is snappier but twitchier.
+export BEAMPILOT_STEER_SWEEP_SECONDS="0.15"
+
+# Cruise keys, single letters. Check BeamNG's settings/inputmaps/keyboard.json
+# for conflicts before rebinding -- a key bound on both sides does both things.
+export BEAMPILOT_KEY_SET="i"
+export BEAMPILOT_KEY_RESUME="o"
+export BEAMPILOT_KEY_CANCEL="u"
+export BEAMPILOT_CRUISE_STEP_MPH="1.0"
+
 # How closely it follows / how late it brakes for the car ahead.
 #   0 = aggressive (1.25s gap, brakes latest)   1 = standard (1.45s)
 #   2 = relaxed    (1.75s gap, brakes earliest)

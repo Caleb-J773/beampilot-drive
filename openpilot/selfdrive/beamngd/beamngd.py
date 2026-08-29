@@ -13,8 +13,8 @@ from evdev import ecodes
 
 from opendbc.car.honda.values import CruiseButtons
 from opendbc.car.interfaces import ACCEL_MAX, ACCEL_MIN
+from openpilot.common.beampilot_env import env_float, env_int, env_str
 from openpilot.common.constants import CV
-from openpilot.selfdrive.controls.lib.drive_helpers import env_float
 from opendbc.car.structs import car
 from opendbc.car.vehicle_model import VehicleModel
 from openpilot.cereal import messaging
@@ -34,9 +34,13 @@ from openpilot.selfdrive.beamngd.virtual_joystick import BeamNGVirtualJoystick
 # SimulatorState/SimulatedCar/SimulatedSensors pipeline the MetaDrive bridge
 # (openpilot/tools/sim/bridge/metadrive) already uses, instead of hand-rolling it.
 
-BEAMNG_ADDRESS = "127.0.0.1"
-TELEMETRY_PORT = 49152
-CONTROL_PORT = 49153
+BEAMNG_ADDRESS = env_str("BEAMPILOT_BEAMNG_ADDRESS", "127.0.0.1")
+TELEMETRY_PORT = env_int("BEAMPILOT_TELEMETRY_PORT", 49152)
+CONTROL_PORT = env_int("BEAMPILOT_CONTROL_PORT", 49153)
+# NOTE: the Lua mod has its own copies of these ports. If you change them here,
+# change TELEMETRY_PORT/CONTROL_PORT in
+# tools/beamng_mod/beampilot_bridge/lua/vehicle/protocols/beampilot.lua too --
+# vehicle Lua has no access to this process's environment.
 
 # "lua" (default): send steering/throttle/brake to the beampilot_bridge mod's
 # control socket, applied via input.event() straight into vehicle Lua -- no
@@ -44,7 +48,7 @@ CONTROL_PORT = 49153
 # "joystick": emit through a uinput virtual wheel instead; BeamNG.drive must be
 # told once (Options > Controls) which of its axes are steering/throttle/
 # brake, same as setting up a real USB wheel. See virtual_joystick.py.
-CONTROL_MODE = os.environ.get("BEAMPILOT_CONTROL_MODE", "lua")
+CONTROL_MODE = env_str("BEAMPILOT_CONTROL_MODE", "lua")
 if CONTROL_MODE not in ("lua", "joystick"):
   raise ValueError(f"BEAMPILOT_CONTROL_MODE must be 'lua' or 'joystick', got {CONTROL_MODE!r}")
 
@@ -64,9 +68,12 @@ if CONTROL_MODE not in ("lua", "joystick"):
 # back steering_wheel_deg=+510.00 (see electrics.values.steering, this car's
 # actual v.data.input.steeringWheelLock -- not necessarily the same for every
 # BeamNG vehicle, but this is the one actually spawned during testing).
-MAX_STEERING_WHEEL_ANGLE_DEG = 510.0
+# Per-vehicle: measure yours by holding full lock and reading steering_wheel_deg
+# in tools/beampilot_monitor.py, then set BEAMPILOT_STEER_LOCK_DEG to match.
+# Too low makes openpilot oversteer, too high makes it run wide.
+MAX_STEERING_WHEEL_ANGLE_DEG = env_float("BEAMPILOT_STEER_LOCK_DEG", 510.0)
 
-BEAMNGD_TICK_HZ = 100.0
+BEAMNGD_TICK_HZ = env_float("BEAMPILOT_TICK_HZ", 100.0)
 # actuators.torque has to become a steering *position* for BeamNG's
 # input.event, and snapping straight to it (position = -torque) is too
 # instant/twitchy -- but naively integrating torque as a *velocity*
@@ -81,7 +88,9 @@ BEAMNGD_TICK_HZ = 100.0
 # same range as position) and rate-limit the approach to that target. Smooth,
 # not instant, but with a real bounded equilibrium -- steady torque settles at
 # a steady position and stays there, instead of growing without bound.
-STEER_FULL_SWEEP_SECONDS = 0.15  # rough estimate for how fast to chase the target position
+# Seconds for a full lock-to-lock sweep. Lower = snappier but twitchier;
+# raise it if steering feels jittery, lower it if it responds too slowly.
+STEER_FULL_SWEEP_SECONDS = env_float("BEAMPILOT_STEER_SWEEP_SECONDS", 0.15)
 STEER_POSITION_RATE_LIMIT_PER_TICK = 2.0 / (STEER_FULL_SWEEP_SECONDS * BEAMNGD_TICK_HZ)
 
 TELEMETRY_MAGIC = b"BPL1"
@@ -92,8 +101,22 @@ DL_RIGHT_BLINKER = 2
 DL_PARKING_BRAKE = 4
 DL_IGNITION_ON   = 8
 
-CRUISE_KEYS = (ecodes.KEY_I, ecodes.KEY_O, ecodes.KEY_U)  # DECEL_SET, RES_ACCEL, CANCEL
-CRUISE_SPEED_STEP = 1.0 * CV.MPH_TO_MS  # matches a real Honda's per-tap SET/RES speed nudge
+# Cruise-control keys, as single letters. Defaults are i/o/u -- NOT the more
+# obvious c/v/b, which collide with BeamNG.drive's own bindings (c cycles the
+# camera). If you rebind these, check settings/inputmaps/keyboard.json in the
+# BeamNG install for conflicts first: a key bound on both sides will do both.
+def _key_from_letter(letter: str, fallback: int) -> int:
+  code = getattr(ecodes, f"KEY_{letter.strip().upper()[:1]}", None)
+  return code if isinstance(code, int) else fallback
+
+
+KEY_SET = _key_from_letter(env_str("BEAMPILOT_KEY_SET", "i"), ecodes.KEY_I)
+KEY_RESUME = _key_from_letter(env_str("BEAMPILOT_KEY_RESUME", "o"), ecodes.KEY_O)
+KEY_CANCEL = _key_from_letter(env_str("BEAMPILOT_KEY_CANCEL", "u"), ecodes.KEY_U)
+CRUISE_KEYS = (KEY_SET, KEY_RESUME, KEY_CANCEL)  # DECEL_SET, RES_ACCEL, CANCEL
+
+# Per-tap speed nudge. 1 mph matches a real Honda's SET/RES behavior.
+CRUISE_SPEED_STEP = env_float("BEAMPILOT_CRUISE_STEP_MPH", 1.0) * CV.MPH_TO_MS
 GPS_RATE_HZ = 10.0  # SERVICE_LIST['gpsLocationExternal'].frequency
 
 # The acceleration range the longitudinal planner may actually command, after
@@ -175,11 +198,11 @@ def read_cruise_button(devices: list[evdev.InputDevice]) -> int:
     try:
       for ev in dev.read():
         if ev.type == ecodes.EV_KEY and ev.value == 1:  # key down (0=up, 1=down, 2=repeat)
-          if ev.code == ecodes.KEY_I:
+          if ev.code == KEY_SET:
             result = CruiseButtons.DECEL_SET
-          elif ev.code == ecodes.KEY_O:
+          elif ev.code == KEY_RESUME:
             result = CruiseButtons.RES_ACCEL
-          elif ev.code == ecodes.KEY_U:
+          elif ev.code == KEY_CANCEL:
             result = CruiseButtons.CANCEL
     except (BlockingIOError, OSError):
       continue
