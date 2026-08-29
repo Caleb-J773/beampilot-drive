@@ -165,7 +165,7 @@ def build_sections() -> list[Section]:
               "lua injects into the game directly. joystick needs axes bound in BeamNG's Options > Controls.",
               "lua", choices=["lua", "joystick"]),
     ]),
-    Section("Perception", "What the mod can see that a camera on a screen cannot: other traffic, exactly.", [
+    Section("Blind spot", "The mod sees every vehicle in the scene, so openpilot can refuse to move into one.", [
       Setting("BEAMPILOT_BSM", "Blind spot monitoring",
               "Detected in the BeamNG mod, so it works off the simulator's own traffic rather than the camera."
               + " Blocks a signalled lane change and shows \"Car Detected in Blindspot\"."
@@ -180,6 +180,11 @@ def build_sections() -> list[Section]:
               "How late into the move a cancel may still fire. Past the halfway point the car is mostly"
               + " in the new lane and swerving back is its own hazard. Set very high to allow it any time.",
               "2.0", numeric=True, step=0.5),
+      Setting("BEAMPILOT_SIGNAL_AUTO_CANCEL", "Cancel signal after a change",
+              "Switch the blinker off once a lane change finishes. Nothing in the game cancels an"
+              + " indicator that was never physically stalked. A change cancelled by the blind spot"
+              + " deliberately keeps its signal on, which is what lets it resume.",
+              "1", choices=["1", "0"]),
       Setting("BEAMPILOT_BSM_APPROACHING", "Warn on closing traffic",
               "Also count a car that is not beside you yet but is closing fast enough to be there mid-manoeuvre.",
               "1", choices=["1", "0"]),
@@ -196,23 +201,40 @@ def build_sections() -> list[Section]:
       Setting("BEAMPILOT_BSM_DEBUG", "Log state changes",
               "Prints every blind spot change to the beamngd terminal and the BeamNG console. For tuning the zone.",
               "0", choices=["0", "1"]),
+    ]),
+    Section("Radar", "Where the car in front actually is, from the simulator rather than from the camera.", [
       Setting("BEAMPILOT_RADAR", "Ground-truth radar",
-              "Reports nearby traffic as radar points. This car is radarless, so without it openpilot"
-              + " finds the lead with the camera alone -- the same camera that is fed the wrong"
-              + " intrinsics, and distance to the car in front is what that gets wrong.",
+              "Reports nearby traffic as radar points. This car is radarless, so with this off openpilot"
+              + " finds the lead with the camera alone -- the same camera that is fed the wrong intrinsics,"
+              + " and distance to the car in front is exactly what that gets wrong."
+              + " Needs the mod reinstalled if you are upgrading from an older build.",
               "1", choices=["1", "0"]),
       Setting("BEAMPILOT_RADAR_LEADS", "Radar can find a lead alone",
               "Let a track become the lead with no confirmation from the camera. Stock openpilot refuses,"
               + " because a real radar has false positives; these points are ground truth and cannot."
-              + " Off means radar only refines a lead the camera already found.",
+              + " Off means radar only refines a lead the camera already found, which does nothing for"
+              + " the case that actually hurts: the model missing a lead entirely.",
               "1", choices=["1", "0"]),
+      Setting("BEAMPILOT_RADAR_LEAD_HALF_WIDTH_M", "In-lane width (m)",
+              "How far off the model's predicted path a track may sit and still count as being in your"
+              + " lane. Measured against the path, so it follows a bend. Wider risks braking for the"
+              + " next lane over; narrower risks missing your own lead on a curve.",
+              "1.8", numeric=True, step=0.2),
       Setting("BEAMPILOT_RADAR_RANGE_M", "Radar range (m)",
-              "About as far as real automotive radar reaches.",
+              "About as far as real automotive radar reaches. Past this the planner has nothing to do"
+              + " with the information anyway.",
               "150", numeric=True, step=10.0),
-      Setting("BEAMPILOT_SIGNAL_AUTO_CANCEL", "Cancel signal after a change",
-              "Switch the blinker off once a lane change finishes. Nothing in the game cancels an"
-              + " indicator that was never physically stalked.",
-              "1", choices=["1", "0"]),
+      Setting("BEAMPILOT_RADAR_HALF_WIDTH_M", "Beam half-width (m)",
+              "How wide the beam is at your bumper, before it spreads. Wide enough to hold the next lane"
+              + " on a curve, narrow enough not to fill the track list with oncoming traffic.",
+              "4.5", numeric=True, step=0.5),
+      Setting("BEAMPILOT_RADAR_MAX_TRACKS", "Max tracks",
+              "Nearest first; anything past this is dropped. Hard ceiling of 24 in the wire format.",
+              "12", numeric=True, step=1.0),
+      Setting("BEAMPILOT_RADAR_DEBUG", "Log the nearest track",
+              "Prints the closest track to the BeamNG console every scan. Noisy in traffic; for checking"
+              + " the mod sees what you think it does.",
+              "0", choices=["0", "1"]),
     ]),
     Section("Camera", "beamcamd captures the BeamNG window off your desktop.", [
       Setting("BEAMPILOT_CAPTURE_BACKEND", "Capture backend",
