@@ -583,8 +583,26 @@ spawns:
           steering lock -- turn the wheel to measure it) wheelbase=2.34m ...
 ```
 
-**Turning lock to lock once before engaging measures it properly and stores it**, and after that
-the car is simply right.
+**And you do not have to do either.** The first time a vehicle and rack are seen, the mod sweeps
+the steering itself while you are parked — about 2.5 seconds — and reads the ratio straight off
+the result. Exact, then cached, then never asked for again.
+
+That sweep is the reason there is no shipped lookup table. A table keyed on the vehicle is wrong
+after a rack swap, and it could never cover a mod or a custom config at all. A car that measures
+itself covers every case, including cars that do not exist yet.
+
+It samples the *measured* steering wheel angle against the *measured* road wheel angle, so the
+rack's own rate limit lagging behind the command does not affect the answer — it is the
+relationship between two observed quantities, not between a command and an observation. Against a
+simulated rack with a known 17.5 ratio and realistic lag, it recovers 17.50.
+
+It only ever runs stopped, with openpilot not driving, and aborts the instant either stops being
+true. `BEAMPILOT_STEER_CALIBRATE=0` turns it off and goes back to measuring from ordinary driving.
+
+> [!TIP]
+> If a car runs wide in fast corners, also check BeamNG's **Options → Controls → "limit steering at
+> high speed"**. With its "direct input" variant enabled, every steering command openpilot sends is
+> silently scaled down as speed rises. The mod warns in the console when it sees both switched on.
 
 Tyre stiffness is re-derived at the new geometry rather than left at the Civic's: opendbc computes
 it from mass and weight distribution (`scale_tire_stiffness`), and it is the front/rear stiffness

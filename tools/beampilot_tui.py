@@ -250,6 +250,14 @@ def build_sections() -> list[Section]:
               + " varies -- so the ratio is very nearly proportional to it. Off falls back to the"
               + " fingerprint's value.",
               "1", choices=["1", "0"]),
+      Setting("BEAMPILOT_STEER_CALIBRATE", "Measure the ratio automatically",
+              "The first time a vehicle and rack are seen, the mod sweeps the steering once while"
+              + " you are parked and reads the ratio straight off it -- about 2.5 seconds, exact,"
+              + " then remembered forever. This is why there is no per-car lookup table: a table"
+              + " could never cover a mod, a custom config or a rack swap. Only ever runs stopped"
+              + " with openpilot not driving, aborts the moment either changes, and is not asked"
+              + " for at all once the ratio is known. Off measures from ordinary driving instead.",
+              "1", choices=["1", "0"]),
       Setting("BEAMPILOT_STEER_RATIO_CACHE", "Remembered ratios",
               "Where measured steering ratios are saved, keyed by vehicle AND steering lock"
               + " (BeamNG's racks are parts, not car properties). Plain JSON, meant to be edited:"

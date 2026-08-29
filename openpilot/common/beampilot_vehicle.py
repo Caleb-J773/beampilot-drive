@@ -141,7 +141,7 @@ LIMITS = {
 }
 
 
-def lua_config() -> dict[str, float]:
+def lua_config(calibrate: bool = True) -> dict[str, float]:
   """Geometry-reporting tuning pushed down to the mod in the control packet.
 
   Keys mirror VEHICLE_DEFAULTS in beampilot.lua. Vehicle Lua cannot read this
@@ -158,6 +158,19 @@ def lua_config() -> dict[str, float]:
     # often; lowering it means a faster but noisier one.
     "minSteerDeg": env_float("BEAMPILOT_GEOMETRY_MIN_STEER_DEG", 20.0),
     "minWheelDeg": env_float("BEAMPILOT_GEOMETRY_MIN_WHEEL_DEG", 0.3),
+    "minSamples": float(env_int("BEAMPILOT_GEOMETRY_MIN_SAMPLES", 10)),
+    # Sweep the rack once, while parked, rather than waiting for the driver to
+    # happen to turn far enough. Passed as False once the ratio for this
+    # vehicle and rack is already remembered -- there is nothing to learn, and a
+    # wheel that moves by itself every single spawn would be a nuisance.
+    "calibrate": 1.0 if (calibrate and env_bool("BEAMPILOT_STEER_CALIBRATE", True)) else 0.0,
+    "calibrateSeconds": env_float("BEAMPILOT_STEER_CALIBRATE_SECONDS", 2.5),
+    # Fraction of full lock. Short of the stops on purpose: the last few degrees
+    # are where the rack binds and the linkage stops being linear.
+    "calibrateAmplitude": env_float("BEAMPILOT_STEER_CALIBRATE_AMPLITUDE", 0.55),
+    # m/s. Only ever while stopped -- a rack that turns itself while parked is
+    # surprising, one that does it at speed would be dangerous.
+    "calibrateMaxSpeed": env_float("BEAMPILOT_STEER_CALIBRATE_MAX_SPEED", 0.8),
     # Logs the measured numbers to the BeamNG console each time they are sent.
     "debug": 1.0 if env_bool("BEAMPILOT_GEOMETRY_DEBUG", False) else 0.0,
   }

@@ -152,6 +152,16 @@ local VEHICLE_DEFAULTS = {
   minSteerDeg = 20.0,   -- below this the road wheel angle is mostly toe-in
   minWheelDeg = 0.3,    -- ...and node jitter, and dividing by it is nonsense
   minSamples = 10,      -- do not report a ratio built from one odd moment
+  -- Self-calibration. Rather than wait for the driver to happen to turn far
+  -- enough, sweep the rack once while parked and read the answer off directly.
+  -- This is what makes a per-vehicle steering-ratio TABLE unnecessary: BeamNG's
+  -- racks are parts rather than car properties, so any table would be wrong the
+  -- moment a different one is fitted -- and it could never cover a mod or a
+  -- custom config at all. A car that measures itself covers all of them.
+  calibrate = 1,
+  calibrateSeconds = 2.5,   -- one full triangle sweep, both directions
+  calibrateAmplitude = 0.55,-- fraction of full lock; short of the stops
+  calibrateMaxSpeed = 0.8,  -- m/s. Only ever while stopped.
   debug = 0,
 }
 
@@ -344,6 +354,8 @@ local vehicleName = ""
 local vehicleStatic = nil            -- nil until measured; retried until it works
 local vehicleFrontWheels = nil       -- {leftWheelId, rightWheelId}
 local steerSumXY, steerSumXX, steerSamples = 0, 0, 0
+local calPhase, calElapsed, calWasControlling = "idle", 0, false
+local steerLimitWarned = false
 
 local function vehicleResetMeasurements()
   vehicleAccum = 0
@@ -351,6 +363,26 @@ local function vehicleResetMeasurements()
   vehicleStatic = nil
   vehicleFrontWheels = nil
   steerSumXY, steerSumXX, steerSamples = 0, 0, 0
+  calPhase, calElapsed = "idle", 0
+end
+
+-- BeamNG can scale steering down as speed rises (Options > Controls > "limit
+-- steering at high speed"). input.lua only applies it to FILTER_DIRECT input --
+-- which is what openpilot's steering IS -- when the separate "direct" variant
+-- is also on. Both default off, but if they are on, every steering command
+-- openpilot sends is quietly multiplied by less than one at speed, and the
+-- symptom is a car that runs wide through fast corners for no visible reason.
+-- Exactly the failure this whole measurement exists to remove, so say so.
+local function warnAboutSteeringLimit()
+  if steerLimitWarned or not settings then return end
+  steerLimitWarned = true
+  local ok, limited = pcall(settings.getValue, "steeringLimitEnabled", false)
+  local okD, direct = pcall(settings.getValue, "steeringLimitEnabledDirect", false)
+  if ok and okD and limited and direct then
+    log("W", "", "beampilot: BeamNG's \"limit steering at high speed\" is enabled for direct "
+        .. "input. openpilot's steering will be scaled down as speed rises, which looks like "
+        .. "running wide in fast corners. Turn it off in Options > Controls.")
+  end
 end
 
 -- Forward and right unit vectors in node space, from the reference nodes every
@@ -507,6 +539,74 @@ local function vehicleSampleSteerRatio()
   steerSamples = steerSamples + 1
 end
 
+-- Sweep the rack while parked and read the ratio straight off it, instead of
+-- waiting for the driver to happen to turn far enough. Two and a half seconds,
+-- once per vehicle, and the answer is then cached on the openpilot side for
+-- good (see SteerRatioCache in beampilot_vehicle.py).
+--
+-- The sweep drives the steering INPUT, but every sample is still the measured
+-- steering wheel angle against the measured road wheel angle -- so the rack's
+-- own rate limit lagging behind the command does not matter at all. It is the
+-- relationship between two observed quantities, not between a command and an
+-- observation.
+--
+-- Refuses to run unless the car is stopped and openpilot is not driving, and
+-- aborts the moment either stops being true. A rack that turns by itself while
+-- parked is surprising; one that does it at speed would be dangerous.
+local function vehicleCalibrate(dtSim)
+  if vehicleCfg.calibrate == 0 or calPhase == "done" then return end
+  if steerSamples >= vehicleCfg.minSamples and calPhase == "idle" then
+    calPhase = "done"   -- already measured from ordinary driving; nothing to do
+    return
+  end
+
+  local speed = math.abs(electrics.values.wheelspeed or 0)
+  local moving = speed > vehicleCfg.calibrateMaxSpeed
+  if moving or isControlling then
+    if calPhase == "sweeping" then
+      input.event("steering", 0, FILTER_DIRECT)
+      calPhase = "idle"          -- try again next time the car is stopped
+      calElapsed = 0
+      log("I", "", "beampilot: steering calibration aborted (the car moved, or openpilot took over)")
+    end
+    return
+  end
+
+  if calPhase == "idle" then
+    calPhase = "sweeping"
+    calElapsed = 0
+    log("I", "", "beampilot: measuring this vehicle's steering ratio (~"
+        .. string.format("%.1f", vehicleCfg.calibrateSeconds) .. "s, the wheel will move)")
+  end
+
+  calElapsed = calElapsed + (dtSim or 0)
+  local duration = math.max(vehicleCfg.calibrateSeconds, 0.5)
+  local t = calElapsed / duration
+
+  if t >= 1 then
+    input.event("steering", 0, FILTER_DIRECT)
+    calPhase = "done"
+    local ratio = steerSumXX > 0 and (steerSumXY / steerSumXX) or 0
+    if steerSamples >= vehicleCfg.minSamples then
+      log("I", "", string.format("beampilot: steering ratio measured as %.2f from %d samples",
+                                 ratio, steerSamples))
+    else
+      log("W", "", "beampilot: steering calibration produced too few usable samples;"
+          .. " it will keep measuring as you drive")
+    end
+    return
+  end
+
+  -- Triangle: 0 -> +A -> -A -> 0, so both directions are sampled and any
+  -- asymmetry in the rack averages out rather than biasing the fit.
+  local a = vehicleCfg.calibrateAmplitude
+  local wave
+  if t < 0.25 then wave = t * 4
+  elseif t < 0.75 then wave = 2 - t * 4
+  else wave = t * 4 - 4 end
+  input.event("steering", math.max(-1, math.min(1, wave * a)), FILTER_DIRECT)
+end
+
 local function vehicleSend()
   if not vehicleFfi or not vehiclePacket or not vehicleStatic then return end
   if not vehicleSocket then
@@ -556,7 +656,11 @@ local function vehicleUpdate(dtSim)
   -- Sampling the steer ratio every step is the point: the wheel is only turned
   -- far enough to measure for a moment at a time, and missing those moments is
   -- how you end up with no ratio after a whole drive.
-  if vehicleStatic then vehicleSampleSteerRatio() end
+  if vehicleStatic then
+    warnAboutSteeringLimit()
+    vehicleCalibrate(dtSim)
+    vehicleSampleSteerRatio()
+  end
 
   vehicleAccum = vehicleAccum + (dtSim or 0)
   local interval = 1 / math.max(vehicleCfg.rateHz, 0.05)

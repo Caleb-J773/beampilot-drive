@@ -194,6 +194,20 @@ export BEAMPILOT_CAM_WINDOW="beamng"
 # export BEAMPILOT_SEED_STEER_RATIO="0"            # 0 = use the fingerprint's instead
 # export BEAMPILOT_TYPICAL_MAX_WHEEL_ANGLE_DEG="33.0"   # the assumed denominator
 
+# Better than either: the car measures ITSELF. The first time a vehicle+rack is
+# seen, the mod sweeps the steering once while you are parked and reads the
+# ratio straight off it -- about two and a half seconds, exact, and then cached
+# forever. This is why there is no per-vehicle lookup table: a table could never
+# cover a mod, a custom config, or a rack swap, and a car that measures itself
+# covers all three.
+#
+# Only ever runs stopped and with openpilot not driving, and aborts the instant
+# either stops being true. Not requested at all once the ratio is known.
+# export BEAMPILOT_STEER_CALIBRATE="0"             # 0 = never sweep; measure while driving
+# export BEAMPILOT_STEER_CALIBRATE_SECONDS="2.5"
+# export BEAMPILOT_STEER_CALIBRATE_AMPLITUDE="0.55"  # fraction of lock; short of the stops
+# export BEAMPILOT_STEER_CALIBRATE_MAX_SPEED="0.8"   # m/s
+
 # Manual overrides. Any of these that is set WINS over both the mod's
 # measurement and CarParams -- use them to pin a number you do not trust, or to
 # get the old hand-tuned behaviour back. Unset = measured, else the Civic's.

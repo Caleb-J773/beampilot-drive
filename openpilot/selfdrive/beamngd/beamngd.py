@@ -23,7 +23,7 @@ from openpilot.common.beampilot_radar import lua_config as radar_lua_config
 from openpilot.common.beampilot_vehicle import SteerRatioCache, VehicleGeometryReceiver
 from openpilot.common.beampilot_vehicle import lua_config as vehicle_lua_config
 from openpilot.common.beampilot_vehicle import resolve as resolve_geometry
-from openpilot.common.beampilot_vehicle import steer_ratio_source
+from openpilot.common.beampilot_vehicle import env_overrides, steer_ratio_source
 from openpilot.common.constants import CV
 from opendbc.car.structs import car
 from opendbc.car.vehicle_model import VehicleModel
@@ -666,6 +666,22 @@ class BeamNGBridge:
               + f" {self.steer_lock_deg:.0f} but this vehicle's lock is {lock:.0f} deg."
               + " Unset it to use the measured value.", flush=True)
 
+  def ratio_is_known(self) -> bool:
+    """Is a steer ratio for the vehicle currently spawned already settled?
+
+    True if it is pinned by hand, measured this run, or remembered from a
+    previous drive on this same vehicle and rack. Only the unknown case is
+    worth interrupting the car to sweep for.
+    """
+    if "steerRatio" in env_overrides():
+      return True
+    if self.geometry is None:
+      return False
+    if "steerRatio" in self.geometry.values:
+      return True
+    lock = self.geometry.values.get("steerLockDeg", 0.0)
+    return bool(lock) and self.ratio_cache.get(self.geometry.name, lock) is not None
+
   def refresh_vehicle_model(self, force: bool = False):
     """(Re)build the VehicleModel from CarParams plus any measured geometry.
 
@@ -852,7 +868,10 @@ class BeamNGBridge:
     if self.bsm_config_due():
       payload["bsm"] = bsm_lua_config()
       payload["radar"] = radar_lua_config()
-      payload["vehicle"] = vehicle_lua_config()
+      # Only ask for a calibration sweep if we do not already know this
+      # vehicle and rack. Nothing to learn otherwise, and a steering wheel that
+      # moves by itself on every spawn gets old fast.
+      payload["vehicle"] = vehicle_lua_config(calibrate=not self.ratio_is_known())
     if self.signal_cancel_ticks > 0:
       payload["cancelSignal"] = self.signal_cancel_side
       self.signal_cancel_ticks -= 1
