@@ -191,6 +191,19 @@ These were each a real bug that cost significant debugging time. Don't regress t
   struct turns "old mod, no BSM" into "old mod, no telemetry at all".
 - **A stale BSM feed must fail to *clear*, not to *blocked*.** A latched warning blocks every
   lane change for the rest of the drive with nothing on screen to explain it. 0.5s timeout.
+- **Ground-truth radar makes openpilot brake absurdly early if you let it invent leads.**
+  `BEAMPILOT_RADAR_LEADS` lifts radard's vision gate, which hands openpilot leads the camera never
+  saw -- so distance management starts far earlier than normal. Off by default now; radar refines
+  a vision lead instead, which fixes the distance error without moving the timing. Oncoming
+  traffic must also be filtered at the source: an approaching car picked as a lead is a
+  hard-braking event for a car that was going to pass on the other side, and the in-path test on a
+  narrow road will pick one.
+- **The turn signal auto-cancel needs the DURATION, not just the state transition.** Completion
+  and blind-spot abort both leave laneChangeStarting for preLaneChange, and a car in the blind
+  spot as the change completed (common -- you just overtook it) looked exactly like an abort, so
+  the signal was left on for a resume that never came. desire_helper can only abort while its
+  timer is under BEAMPILOT_LANE_CHANGE_ABORT_S, so a longer manoeuvre did NOT end in an abort;
+  that is exact, not a heuristic. The repeat window also had to go from 0.15s to 1.5s.
 - **capnp lists are NOT Python lists.** They support `len()` and integer indexing but not
   slicing, and a plain list supports all three -- so a test written against lists passes while
   the real thing raises `TypeError` on its first frame. That is exactly how the curve limiter

@@ -101,14 +101,25 @@ local BSM_DEFAULTS = {
 -- the model's device frame is y-right), vRel in m/s along our heading with
 -- negative meaning closing.
 local RADAR_DEFAULTS = {
-  enabled = 1,
+  enabled = 0,         -- off unless asked for; see beampilot_radar.py
   port = 49155,        -- straight to card.py, which owns radarTracks
-  rangeM = 150.0,      -- about as far as automotive radar reaches
-  halfWidthM = 4.5,    -- beam half-width at the bumper...
-  spread = 0.12,       -- ...growing by this much per metre of range
+  rangeM = 110.0,      -- shorter than real radar reaches, on purpose (below)
+  halfWidthM = 3.0,    -- beam half-width at the bumper...
+  spread = 0.07,       -- ...growing by this much per metre of range
   minDRelM = 0.5,      -- a forward radar cannot see behind its own bumper
   maxTracks = 12,      -- capped again by MAX_TRACKS in beampilot_radar.py
   rateHz = 20.0,       -- DT_MDL; radard is driven by the model's rate
+  -- How much of the cheating to give back. mapmgr knows where every vehicle is,
+  -- through hills and buildings, with exact velocities -- which is not a radar,
+  -- it is omniscience, and openpilot behaves unrealistically well on it.
+  oncoming = 0,        -- report vehicles travelling towards us. Off: an
+                       -- approaching car is not a lead, and treating one as
+                       -- such is a hard-braking event for no reason.
+  occlusion = 1,       -- drop anything with no line of sight (static geometry
+                       -- only, so a car does not hide the car behind it --
+                       -- radar does see under and around one).
+  noiseM = 0.12,       -- range noise, metres. Real radar is not exact.
+  noiseMs = 0.06,      -- range-rate noise, m/s.
   debug = 0,
 }
 
@@ -138,6 +149,33 @@ local relPos, relVel = vec3(), vec3()
 local bsmTouching = {}
 local radarTracks = {}    -- reused list of {id, dRel, yRel, vRel} rows
 local radarCount = 0
+local rayFrom, rayDir = vec3(), vec3()
+local tgtFwdWorld, tgtVel = vec3(), vec3()
+
+-- A cheap deterministic jitter, so a track's reported range does not sit on the
+-- exact truth. math.random would make the stream unreproducible run to run,
+-- which is worse for debugging than a repeatable wobble.
+local noisePhase = 0
+local function jitter(scale)
+  if scale <= 0 then return 0 end
+  noisePhase = (noisePhase * 1103515245 + 12345) % 2147483648
+  return ((noisePhase / 2147483648) * 2 - 1) * scale
+end
+
+-- Line of sight against static geometry. ai.lua:4189 uses the same idiom: the
+-- ray reports the distance to the first hit, so anything >= the target's own
+-- distance means nothing solid is in the way. Raised off the ground or every
+-- ray terminates on the road surface immediately.
+local function hasLineOfSight(egoCentre, egoUpVec, tgtC, distance)
+  rayFrom:setAddScaled(egoCentre, egoUpVec, 0.5)
+  rayDir:setSub2(tgtC, rayFrom)
+  local len = rayDir:length()
+  if len < 1e-3 then return true end
+  rayDir:setScaled(1 / len)
+  local ok, hit = pcall(function() return obj:castRayStatic(rayFrom, rayDir, len) end)
+  if not ok or type(hit) ~= "number" then return true end -- no ray, no filtering
+  return hit >= len - 0.5
+end
 
 -- The radar packet is built with ffi rather than assembled by hand: LuaJIT has
 -- no string.pack (that is Lua 5.3), and BeamNG's own protocols.lua already
@@ -335,12 +373,38 @@ local function perceptionScan()
                     relVel:setSub2(o.vel, egoVel)
                     vRel = relVel:dot(egoFwd)
                   end
-                  radarCount = radarCount + 1
-                  local row = radarTracks[radarCount]
-                  if row then
-                    row[1], row[2], row[3], row[4] = id, dRel, yRel, vRel
-                  else
-                    radarTracks[radarCount] = {id, dRel, yRel, vRel}
+
+                  -- Oncoming traffic is not a lead. Treating one as such is a
+                  -- hard-braking event for a car that is going to pass on the
+                  -- other side, and with the lane-width in-path test that is
+                  -- exactly what a narrow road produces. A vehicle facing the
+                  -- other way but NOT MOVING is kept: that is a broken-down car
+                  -- in our lane, which very much is something to brake for.
+                  local keep = true
+                  if radar.oncoming == 0 and o.vel then
+                    tgtVel:set(o.vel)
+                    tgtFwdWorld:set(tgtFwd)
+                    if tgtVel:length() > 2.0 and tgtFwdWorld:dot(egoFwd) < -0.2 then
+                      keep = false
+                    end
+                  end
+
+                  -- ...and neither is a car on the far side of a hill.
+                  if keep and radar.occlusion ~= 0
+                     and not hasLineOfSight(egoCentre, egoUp, tgtC, dRel) then
+                    keep = false
+                  end
+
+                  if keep then
+                    radarCount = radarCount + 1
+                    local row = radarTracks[radarCount]
+                    local nd = dRel + jitter(radar.noiseM)
+                    local nv = vRel + jitter(radar.noiseMs)
+                    if row then
+                      row[1], row[2], row[3], row[4] = id, nd, yRel, nv
+                    else
+                      radarTracks[radarCount] = {id, nd, yRel, nv}
+                    end
                   end
                 end
               end

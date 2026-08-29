@@ -181,7 +181,7 @@ uv run python tools/beampilot_tui.py
 <details>
 <summary>What the TUI does</summary>
 
-Groups all 53 settings under Hardware / Car / Driving limits / Controls / Blind spot / Radar /
+Groups all 57 settings under Hardware / Car / Driving limits / Controls / Blind spot / Radar /
 Camera / Alerts / Bridge, with an explanation of each and what the stock openpilot value is.
 Detects your GPUs via `nvidia-smi` and `lspci` and only offers backends this machine has.
 Settings that differ from their default are highlighted; ones with consequences (like
@@ -291,7 +291,7 @@ the reason it won't take a corner.
 | `BEAMPILOT_ACCEL_SCALE` | `1.0` | Multiplier on the acceleration envelope. |
 | `BEAMPILOT_DECEL_SCALE` | `1.0` | Same, braking. |
 | `BEAMPILOT_ACTUATION_MARGIN` | `2.0` | Headroom the excessive-actuation check keeps above the limits above. |
-| `BEAMPILOT_CURVE_SLOWDOWN` | `1` | Brake for a corner *before* reaching it. See [below](#slowing-down-for-corners). |
+| `BEAMPILOT_CURVE_SLOWDOWN` | `0` | **Experimental.** Brake for a corner *before* reaching it. See [below](#slowing-down-for-corners-experimental-off-by-default). |
 | `BEAMPILOT_CURVE_LAT_ACCEL` | `0.7 ×` lateral limit | The cornering force to aim for, which sets the speed it slows to. |
 | `BEAMPILOT_PERSONALITY` | `1` | Follow distance: `0` aggressive (1.25 s), `1` standard (1.45 s), `2` relaxed (1.75 s). |
 
@@ -310,9 +310,20 @@ the reason it won't take a corner.
 > `ACTUATION_MARGIN`× headroom above whatever you allow. Run
 > `uv run python -m openpilot.common.beampilot_limits` to print the active envelope.
 
-#### Slowing down for corners
+#### Slowing down for corners (experimental, off by default)
 
-Stock openpilot **holds the set speed through a bend**. It caps acceleration once already
+> [!WARNING]
+> **Off by default, and worth A/B testing rather than assuming.** This adds a planning layer stock
+> openpilot doesn't have. Drive the same road with it on and off before deciding.
+
+Stock openpilot **holds the set speed through a bend** — in *chill* mode. In **Experimental
+mode** it doesn't: end-to-end longitudinal means the model plans the speed itself and
+[does slow for turns](https://blog.comma.ai/090release/). That's the answer to "why does it
+sometimes seem to" — either Experimental mode is on, or you're feeling the acceleration cap
+(`a_x = sqrt(a_total² − a_y²)`) make it coast rather than brake. This README tells you to keep
+Experimental **off** because of the wide-camera problem, which is precisely why chill mode's
+lack of curve braking is worth filling in.
+ It caps acceleration once already
 cornering (`a_x = sqrt(a_total² − a_y²)`), but nothing ever brakes for a corner ahead. On a real
 car that's fine — the wide camera sees round it and a driver is watching. Here the model's view
 is the 25.70° narrow one, so a corner arrives late and thin, and the raised lateral limits above
@@ -369,6 +380,7 @@ tell rather than guess. If it's not binding and the car still runs wide, the cau
 
 | Setting | Default | |
 |---|---|---|
+| `BEAMPILOT_REPORT_GEAR` | `1` | Report the real gear. `0` pins it to drive so openpilot will engage in reverse (arcade mode). |
 | `BEAMPILOT_STEER_LOCK_DEG` | `510` | Your BeamNG car's steering lock. **Per-vehicle.** |
 | `BEAMPILOT_CALIBRATION` | `instant` | `instant` starts already calibrated at a level pose. `live` converges from real driving first, and won't engage until it has. |
 | `BEAMPILOT_STEER_SWEEP_SECONDS` | `0.15` | Lock-to-lock sweep time. Lower is snappier and twitchier. |
@@ -493,25 +505,45 @@ into the `RadarData` it was already publishing. Everything downstream is stock `
 
 | Setting | Default | |
 |---|---|---|
-| `BEAMPILOT_RADAR` | `1` | Master switch. |
-| `BEAMPILOT_RADAR_LEADS` | `1` | Let a track be the lead with no camera confirmation. See below. |
+| `BEAMPILOT_RADAR` | `0` | Master switch. **Off by default** — it's the simulator's object list, not a sensor. |
+| `BEAMPILOT_RADAR_LEADS` | `0` | Let a track be the lead with no camera confirmation. See below. |
+| `BEAMPILOT_RADAR_ONCOMING` | `0` | Report oncoming traffic. Off: an approaching car isn't a lead. |
+| `BEAMPILOT_RADAR_OCCLUSION` | `1` | Require line of sight. Static geometry only. |
+| `BEAMPILOT_RADAR_NOISE_M` / `_MS` | `0.12` / `0.06` | Range and range-rate noise. |
 | `BEAMPILOT_RADAR_LEAD_HALF_WIDTH_M` | `1.8` | How far off the predicted path still counts as in-lane. |
-| `BEAMPILOT_RADAR_RANGE_M` | `150` | About as far as real radar reaches. |
-| `BEAMPILOT_RADAR_HALF_WIDTH_M` / `_SPREAD` | `4.5` / `0.12` | Beam width at the bumper, and per metre of range. |
+| `BEAMPILOT_RADAR_RANGE_M` | `110` | Deliberately shorter than real radar. See below. |
+| `BEAMPILOT_RADAR_HALF_WIDTH_M` / `_SPREAD` | `3.0` / `0.07` | Beam width at the bumper, and per metre of range. |
 | `BEAMPILOT_RADAR_MAX_TRACKS` | `12` | Nearest first; the rest dropped. Wire format caps at 24. |
 | `BEAMPILOT_RADAR_RATE_HZ` | `20` | `DT_MDL` — `radard` runs at the model's rate. |
 | `BEAMPILOT_RADAR_PORT` | `49155` | Mod → `card`, loopback. |
 | `BEAMPILOT_RADAR_INDICATOR` | `1` | Draw the tracks on the road view. See below. |
 | `BEAMPILOT_RADAR_DEBUG` | `0` | Log the nearest track every scan. |
 
-**About `BEAMPILOT_RADAR_LEADS`.** Stock `radard` ignores radar unless the camera already reports
-a lead. That's right on a real car — radar has false positives and braking for one the camera
-can't see is how you get phantom braking. These points can't be false positives.
+#### How much it cheats
 
-Leave the gate in and ground truth only ever *refines* a lead the model already found, which does
-nothing for the case that actually hurts: the model missing one. The risk is picking a car in the
-next lane on a bend, so the in-lane test is measured against the model's predicted path rather
-than straight ahead. Set to `0` for stock fusion.
+`mapmgr` knows where every vehicle is — through hills, in fog, with exact velocities. That isn't a
+radar, it's omniscience, and openpilot behaves unrealistically well on it. So what it reports is
+deliberately a poorer instrument than the simulator could provide:
+
+- **Oncoming traffic is filtered out.** An approaching car isn't a lead, and on a narrow road the
+  in-path test is quite capable of picking one — a hard-braking event for a car that was going to
+  pass on the other side. A car facing the other way but **stationary** is still reported: that's
+  a breakdown in your lane.
+- **Line of sight is required**, against static geometry only, so a car doesn't hide the car
+  behind it (real radar sees under and around one). Without this it reads straight through hills.
+- **Range is 110 m**, not the ~150 m real radar reaches, and the beam is narrow.
+- **Range and range-rate are noisy.** openpilot's Kalman filter is built expecting that.
+
+**About `BEAMPILOT_RADAR_LEADS`.** Stock `radard` ignores radar unless the camera already reports
+a lead. Off (the default) keeps that: ground truth only *refines* a lead the camera found — which
+fixes the distance error, the thing that was actually wrong, without changing when openpilot
+starts reacting.
+
+Turning it **on** hands openpilot leads the camera never saw. That fixes the case the wide-camera
+problem causes (the model missing a lead entirely), but it also means distance management starts
+much earlier than it otherwise would — which from the driver's seat reads as **braking absurdly
+early** for cars still a long way off. The in-lane test is measured against the model's predicted
+path rather than straight ahead, so it at least follows a bend.
 
 #### What you see
 

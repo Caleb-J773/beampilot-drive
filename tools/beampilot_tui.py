@@ -120,6 +120,11 @@ def build_sections() -> list[Section]:
               "", numeric=True, step=0.1),
     ]),
     Section("Car", "The car openpilot believes it is driving.", [
+      Setting("BEAMPILOT_REPORT_GEAR", "Report the real gear",
+              "openpilot raises wrongGear/reverseGear off this, which is what stops it engaging while the"
+              + " car rolls backwards. Turn it off if reversing under openpilot is the point -- arcade"
+              + " mode, or messing about in a car park. Off pins the gear to drive.",
+              "1", choices=["1", "0"]),
       Setting("FINGERPRINT", "Fingerprint",
               "Changing this breaks beamngd -- CAN layouts differ per car.",
               "HONDA_CIVIC_2022",
@@ -151,12 +156,14 @@ def build_sections() -> list[Section]:
       Setting("BEAMPILOT_STEER_SWEEP_SECONDS", "Steering response (s)",
               "Lock-to-lock sweep time. Lower is snappier but twitchier.",
               "0.15", numeric=True, step=0.05),
-      Setting("BEAMPILOT_CURVE_SLOWDOWN", "Slow down for corners",
+      Setting("BEAMPILOT_CURVE_SLOWDOWN", "Slow for corners (EXPERIMENTAL)",
               "Stock openpilot holds the set speed through a bend and only caps acceleration once"
               + " already in it. With a narrow camera the model sees a corner late, so the car carries"
               + " too much speed in and runs wide. This brakes for it beforehand, using the curvature"
-              + " the model has already predicted.",
-              "1", choices=["1", "0"]),
+              + " the model has already predicted. OFF by default -- it is a planning layer stock"
+              + " openpilot does not have, so drive the same road both ways and compare.",
+              "0", choices=["0", "1"],
+              warn="experimental: adds longitudinal planning openpilot does not normally do"),
       Setting("BEAMPILOT_CURVE_LAT_ACCEL", "Cornering accel (m/s2)",
               "What lateral acceleration to aim for in a corner, which sets the speed it slows to."
               + " Defaults to 0.7x the hard lateral limit so there is something in reserve mid-corner."
@@ -226,28 +233,45 @@ def build_sections() -> list[Section]:
       Setting("BEAMPILOT_RADAR", "Ground-truth radar",
               "Reports nearby traffic as radar points. This car is radarless, so with this off openpilot"
               + " finds the lead with the camera alone -- the same camera that is fed the wrong intrinsics,"
-              + " and distance to the car in front is exactly what that gets wrong."
-              + " Needs the mod reinstalled if you are upgrading from an older build.",
-              "1", choices=["1", "0"]),
+              + " and distance to the car in front is exactly what that gets wrong. OFF by default: it is"
+              + " the simulator's object list, not a sensor. Needs the mod reinstalled if you are"
+              + " upgrading from an older build.",
+              "0", choices=["0", "1"]),
       Setting("BEAMPILOT_RADAR_LEADS", "Radar can find a lead alone",
-              "Let a track become the lead with no confirmation from the camera. Stock openpilot refuses,"
-              + " because a real radar has false positives; these points are ground truth and cannot."
-              + " Off means radar only refines a lead the camera already found, which does nothing for"
-              + " the case that actually hurts: the model missing a lead entirely.",
+              "Let a track become the lead with no confirmation from the camera. Off (default) means radar"
+              + " only refines a lead the camera already found -- accurate distance, same timing. ON hands"
+              + " openpilot leads the camera never saw, so it starts managing distance much earlier, which"
+              + " from the seat reads as braking absurdly early for cars still a long way off.",
+              "0", choices=["0", "1"]),
+      Setting("BEAMPILOT_RADAR_ONCOMING", "Report oncoming traffic",
+              "Off by default. An approaching car is not a lead, and on a narrow road the in-path test is"
+              + " quite capable of picking one -- which is a hard-braking event for a car that was going to"
+              + " pass on the other side anyway. A STATIONARY car facing you is still reported: that is a"
+              + " breakdown in your lane.",
+              "0", choices=["0", "1"]),
+      Setting("BEAMPILOT_RADAR_OCCLUSION", "Require line of sight",
+              "Drop anything hidden behind a hill or a building. Static geometry only, so a car does not"
+              + " hide the car behind it -- real radar sees under and around one. This is the big one for"
+              + " realism: without it the radar reads straight through terrain.",
               "1", choices=["1", "0"]),
+      Setting("BEAMPILOT_RADAR_NOISE_M", "Range noise (m)",
+              "Real radar is not exact, and openpilot's Kalman filter is built expecting it not to be."
+              + " 0 gives you the simulator's exact answer.",
+              "0.12", numeric=True, step=0.05),
       Setting("BEAMPILOT_RADAR_LEAD_HALF_WIDTH_M", "In-lane width (m)",
               "How far off the model's predicted path a track may sit and still count as being in your"
               + " lane. Measured against the path, so it follows a bend. Wider risks braking for the"
               + " next lane over; narrower risks missing your own lead on a curve.",
               "1.8", numeric=True, step=0.2),
       Setting("BEAMPILOT_RADAR_RANGE_M", "Radar range (m)",
-              "About as far as real automotive radar reaches. Past this the planner has nothing to do"
-              + " with the information anyway.",
-              "150", numeric=True, step=10.0),
+              "Deliberately shorter than real radar reaches. The camera would never have seen a lead at"
+              + " 150 m, so handing openpilot one changes when it starts managing distance -- which reads"
+              + " as braking absurdly early.",
+              "110", numeric=True, step=10.0),
       Setting("BEAMPILOT_RADAR_HALF_WIDTH_M", "Beam half-width (m)",
-              "How wide the beam is at your bumper, before it spreads. Wide enough to hold the next lane"
-              + " on a curve, narrow enough not to fill the track list with oncoming traffic.",
-              "4.5", numeric=True, step=0.5),
+              "How wide the beam is at your bumper, before it spreads. Narrow enough not to fill the track"
+              + " list with the next carriageway; wide enough to hold your own lane round a bend.",
+              "3.0", numeric=True, step=0.5),
       Setting("BEAMPILOT_RADAR_MAX_TRACKS", "Max tracks",
               "Nearest first; anything past this is dropped. Hard ceiling of 24 in the wire format.",
               "12", numeric=True, step=1.0),

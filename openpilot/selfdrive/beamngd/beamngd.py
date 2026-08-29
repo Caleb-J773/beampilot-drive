@@ -24,7 +24,7 @@ from opendbc.car.structs import car
 from opendbc.car.vehicle_model import VehicleModel
 from openpilot.cereal import log, messaging
 from openpilot.common.params import Params
-from openpilot.common.realtime import DT_DMON, Ratekeeper
+from openpilot.common.realtime import DT_CTRL, DT_DMON, Ratekeeper
 from openpilot.tools.sim.lib.common import SimulatorState, vec3
 from openpilot.tools.sim.lib.simulated_car import SimulatedCar
 from openpilot.tools.sim.lib.simulated_sensors import SimulatedSensors
@@ -123,9 +123,25 @@ BSM_CONFIG_INTERVAL_TICKS = max(1, int(BEAMNGD_TICK_HZ * 2.0))
 # steering arrives through input.event, not the stalk. openpilot knows exactly
 # when the manoeuvre finished, so it is the one that should say so.
 SIGNAL_AUTO_CANCEL = env_bool("BEAMPILOT_SIGNAL_AUTO_CANCEL", True)
-# A cancel is one-shot, and UDP drops. Repeating it for a few ticks is safe
-# because the mod only ever toggles a signal that is currently on.
-SIGNAL_CANCEL_REPEAT_TICKS = max(1, int(BEAMNGD_TICK_HZ * 0.15))
+# A cancel is one-shot, and UDP drops. Repeating it is safe because the mod
+# only ever toggles a signal that is currently ON, so the second and subsequent
+# requests are no-ops. 1.5s rather than the 0.15s this started as: the short
+# window was one of the two reasons the signal sometimes stayed on.
+SIGNAL_CANCEL_REPEAT_TICKS = max(1, int(BEAMNGD_TICK_HZ * 1.5))
+# The other reason. desire_helper.py can only abort a lane change while its
+# timer is under BEAMPILOT_LANE_CHANGE_ABORT_S, so a manoeuvre that ran longer
+# than that CANNOT have ended in an abort -- whatever the blind spot says at
+# the instant it ends. Without this, a car sitting in the blind spot as the
+# change completed (very common: you just overtook it) looked exactly like an
+# abort, and the signal was deliberately left on for a resume that never came.
+LANE_CHANGE_ABORT_WINDOW = env_float("BEAMPILOT_LANE_CHANGE_ABORT_S", 2.0)
+
+# Report the real gear. car_events.py raises wrongGear/reverseGear off it, which
+# is what stops openpilot engaging while the car rolls backwards -- correct for
+# driving, wrong for anything where reversing under openpilot is the point
+# (arcade mode, messing about, testing the bridge in a car park). Off pins the
+# gear to drive, which is what the bridge did before it read the real one.
+REPORT_GEAR = env_bool("BEAMPILOT_REPORT_GEAR", True)
 
 LaneChangeState = log.LaneChangeState
 LaneChangeDirection = log.LaneChangeDirection
@@ -361,6 +377,7 @@ class BeamNGBridge:
     self.prev_lane_change_state = LaneChangeState.off
     self.signal_cancel_side: str | None = None
     self.signal_cancel_ticks = 0
+    self.lane_change_started_at = 0.0
 
     # BSM. The mod does the detection (it can see every vehicle in the scene;
     # we cannot), and this just relays the answer to card.py, which overlays it
@@ -441,7 +458,9 @@ class BeamNGBridge:
     # BeamNG's gearIndex is -1 reverse / 0 neutral / 1+ forward; park is not
     # distinguishable from neutral without the gear STRING, and both are
     # non-engageable, so park reports as neutral.
-    if telemetry.gear < 0:
+    if not REPORT_GEAR:
+      self.state.gear = "drive"
+    elif telemetry.gear < 0:
       self.state.gear = "reverse"
     elif telemetry.gear == 0:
       self.state.gear = "neutral"
@@ -640,16 +659,25 @@ class BeamNGBridge:
   def maybe_cancel_signal(self):
     """Switch the blinker off once a lane change has actually finished.
 
-    The completion path and the blind-spot abort path both leave
+    Both the completion path and the blind-spot abort path leave
     laneChangeStarting for preLaneChange (see desire_helper.py), so the state
-    transition alone cannot tell them apart -- an occupied blind spot on the
-    side being moved into is what distinguishes them. An abort must NOT cancel
-    the signal: leaving it armed is exactly what lets the change resume by
-    itself once the lane clears.
+    transition alone cannot tell them apart. An abort must NOT cancel the
+    signal -- leaving it armed is exactly what lets the change resume once the
+    lane clears -- so getting this wrong in either direction is visible: cancel
+    an abort and it never resumes, miss a completion and the indicator stays on.
+
+    Two things separate them, and the first is exact rather than a heuristic:
+    desire_helper can only abort while its timer is under the abort window, so
+    a manoeuvre that ran longer than that did not end in an abort no matter
+    what the blind spot says at the instant it ends. Only inside that window
+    does the blind spot decide.
     """
     meta = self.sm['modelV2'].meta
     state, direction = meta.laneChangeState, meta.laneChangeDirection
     was_changing = self.prev_lane_change_state == LaneChangeState.laneChangeStarting
+    now = time.monotonic()
+    if state == LaneChangeState.laneChangeStarting and not was_changing:
+      self.lane_change_started_at = now
     self.prev_lane_change_state = state
 
     if not (SIGNAL_AUTO_CANCEL and was_changing):
@@ -657,16 +685,19 @@ class BeamNGBridge:
     if state not in (LaneChangeState.off, LaneChangeState.preLaneChange):
       return
 
-    left, right = resolve(self.bsm_flags)
-    aborted = ((left and direction == LaneChangeDirection.left) or
-               (right and direction == LaneChangeDirection.right))
-    if aborted:
-      return
+    duration = now - self.lane_change_started_at
+    if duration <= LANE_CHANGE_ABORT_WINDOW + DT_CTRL:
+      # Short enough to have been an abort, so let the blind spot decide.
+      left, right = resolve(self.bsm_flags)
+      if ((left and direction == LaneChangeDirection.left) or
+          (right and direction == LaneChangeDirection.right)):
+        return
 
     side = "left" if direction == LaneChangeDirection.left else "right"
     self.signal_cancel_side = side
     self.signal_cancel_ticks = SIGNAL_CANCEL_REPEAT_TICKS
-    print(f"[beamngd] lane change finished, cancelling the {side} signal", flush=True)
+    print(f"[beamngd] lane change finished after {duration:.1f}s,"
+          + f" cancelling the {side} signal", flush=True)
 
   def tick(self):
     self.sm.update(0)

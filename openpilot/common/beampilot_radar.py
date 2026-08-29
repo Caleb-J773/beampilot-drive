@@ -48,7 +48,11 @@ TRACK = struct.Struct("<Ifff")
 MAX_TRACKS = 24
 MAX_PACKET = HEADER.size + MAX_TRACKS * TRACK.size
 
-RADAR_ENABLED = env_bool("BEAMPILOT_RADAR", True)
+# Off by default. It is the simulator's object list, not a sensor: it sees
+# through hills, in fog, and knows exact velocities, and openpilot behaves
+# unrealistically well on that. What is left when it IS enabled is deliberately
+# a poorer instrument than mapmgr could provide -- see lua_config below.
+RADAR_ENABLED = env_bool("BEAMPILOT_RADAR", False)
 RADAR_PORT = env_int("BEAMPILOT_RADAR_PORT", 49155)
 RADAR_ADDRESS = "127.0.0.1"
 # Same reasoning as the blind spot feed: if the mod stops sending, report no
@@ -66,15 +70,30 @@ def lua_config() -> dict[str, float]:
   return {
     "enabled": 1.0 if RADAR_ENABLED else 0.0,
     "port": float(RADAR_PORT),
-    # Real automotive radar reaches ~150m; past that the longitudinal planner
-    # has nothing to do with the information anyway.
-    "rangeM": env_float("BEAMPILOT_RADAR_RANGE_M", 150.0),
+    # Shorter than real radar reaches (~150m), on purpose. The camera would
+    # not have seen a lead at 150m, so handing openpilot one changes when it
+    # starts managing distance -- which reads as braking absurdly early.
+    "rangeM": env_float("BEAMPILOT_RADAR_RANGE_M", 110.0),
     # Half-width of the beam at the sensor, plus a spread with distance -- a
-    # crude cone. Wide enough to hold the next lane over on a curve, narrow
-    # enough not to fill the track list with oncoming traffic on a dual
-    # carriageway.
-    "halfWidthM": env_float("BEAMPILOT_RADAR_HALF_WIDTH_M", 4.5),
-    "spread": env_float("BEAMPILOT_RADAR_SPREAD", 0.12),
+    # crude cone. Narrow enough not to fill the track list with the next
+    # carriageway; wide enough to hold your own lane round a bend.
+    "halfWidthM": env_float("BEAMPILOT_RADAR_HALF_WIDTH_M", 3.0),
+    "spread": env_float("BEAMPILOT_RADAR_SPREAD", 0.07),
+    # Report vehicles travelling towards us. Off by default: an oncoming car is
+    # not a lead, and on a narrow road the in-path test is quite capable of
+    # picking one, which is a hard-braking event for a car that was going to
+    # pass on the other side anyway. A vehicle facing the other way but
+    # STATIONARY is still reported -- that is a broken-down car in your lane.
+    "oncoming": 1.0 if env_bool("BEAMPILOT_RADAR_ONCOMING", False) else 0.0,
+    # Drop anything with no line of sight, against static geometry only, so a
+    # car does not hide the car behind it (radar does see under and around
+    # one). This is the big one for realism: without it the radar reads through
+    # hills and buildings.
+    "occlusion": 1.0 if env_bool("BEAMPILOT_RADAR_OCCLUSION", True) else 0.0,
+    # Range and range-rate noise. Real radar is not exact, and openpilot's
+    # Kalman filter is built expecting it not to be.
+    "noiseM": env_float("BEAMPILOT_RADAR_NOISE_M", 0.12),
+    "noiseMs": env_float("BEAMPILOT_RADAR_NOISE_MS", 0.06),
     # Points behind the front bumper are not something a forward radar sees.
     "minDRelM": env_float("BEAMPILOT_RADAR_MIN_DREL_M", 0.5),
     "maxTracks": float(min(MAX_TRACKS, env_int("BEAMPILOT_RADAR_MAX_TRACKS", 12))),

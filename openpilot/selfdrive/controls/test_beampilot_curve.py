@@ -207,6 +207,12 @@ class TestAgainstRealModelData(unittest.TestCase):
 
 
 class TestDefaults(unittest.TestCase):
+  def test_it_ships_off(self):
+    # Experimental: it adds planning stock openpilot does not do, so it should
+    # be something you turn on to compare, not something you get unasked.
+    from openpilot.common.beampilot_env import env_bool
+    self.assertFalse(env_bool("BEAMPILOT_CURVE_SLOWDOWN", False))
+
   def test_the_target_sits_below_the_hard_lateral_limit(self):
     # Arriving at exactly the limit leaves clip_curvature saturated for the
     # whole bend with nothing in reserve for a mid-corner correction.

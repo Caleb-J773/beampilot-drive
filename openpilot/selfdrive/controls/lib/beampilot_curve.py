@@ -28,7 +28,12 @@ import math
 from openpilot.common.beampilot_env import env_bool, env_float
 from openpilot.common.beampilot_limits import ACCEL_MIN, MAX_LATERAL_ACCEL_NO_ROLL
 
-CURVE_SLOWDOWN = env_bool("BEAMPILOT_CURVE_SLOWDOWN", True)
+# EXPERIMENTAL, and off by default. It adds a planning layer stock openpilot
+# does not have, so it wants comparing against not having it rather than being
+# assumed better -- flip it and drive the same road twice. It is also the only
+# beampilot feature that changes longitudinal behaviour on its own, without a
+# feed from the mod, which is another reason not to have it on unasked.
+CURVE_SLOWDOWN = env_bool("BEAMPILOT_CURVE_SLOWDOWN", False)
 
 # The lateral acceleration to aim for in a corner. Deliberately BELOW the hard
 # lateral limit: arriving at exactly the limit leaves clip_curvature saturated

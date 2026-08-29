@@ -42,8 +42,13 @@ RADAR_TO_CAMERA = 1.52  # RADAR is ~ 1.5m ahead from center of mesh frame
 # wide, misses a lead entirely. Refining a lead it already found does nothing
 # for that.
 #
-# Off restores stock fusion, in which ground truth can only refine.
-RADAR_LEADS = env_bool("BEAMPILOT_RADAR_LEADS", True)
+# OFF by default, which restores stock fusion: ground truth then only refines a
+# lead the camera already found, which is the half that was wrong anyway. Lifting
+# the gate is the aggressive setting -- it hands openpilot leads the camera never
+# saw, so it starts managing distance much earlier than it otherwise would, and
+# that reads from the driver's seat as braking absurdly early for cars that are
+# still a long way off.
+RADAR_LEADS = env_bool("BEAMPILOT_RADAR_LEADS", False)
 # How far off the predicted path a track may sit and still count as "in our
 # lane". Compared against the model's own path, not against straight ahead --
 # on a bend, a car in the next lane is what sits at yRel 0.

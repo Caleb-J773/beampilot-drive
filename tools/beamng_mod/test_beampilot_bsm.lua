@@ -174,6 +174,9 @@ obj = {
   getObjectInitialLength = function(_, id) return world.vehicles[id].len end,
   getObjectInitialWidth = function(_, id) return world.vehicles[id].width end,
   getObjectInitialHeight = function(_, id) return world.vehicles[id].height end,
+  -- Distance to the first static hit. nil means nothing in the way, which is
+  -- what the real call returns as "maxDist" when the ray reaches the end.
+  castRayStatic = function(_, _, _, maxDist) return world.rayHit or maxDist end,
 }
 -- The mod calls these with method syntax, so the receiver arrives as arg 1.
 for name, fn in pairs(obj) do
@@ -223,12 +226,17 @@ local function check(name, got, want)
   end
 end
 
+-- Radar ships DISABLED, so every radar test has to turn it on. Noise off too,
+-- or the exact-value assertions below are testing the jitter.
+local RADAR_ON = '{"engaged": false, "radar": {"enabled": 1.0, "noiseM": 0.0, "noiseMs": 0.0}}'
+
 local function reset()
   sentRadar = nil
   for k in pairs(world.vehicles) do world.vehicles[k] = nil end
   for i = #world.collisions, 1, -1 do world.collisions[i] = nil end
   world.egoVel = {0, 20, 0}
-  pendingControl = nil
+  world.rayHit = nil
+  pendingControl = RADAR_ON
   M.reset()
 end
 
@@ -467,6 +475,70 @@ addVehicle(2, 0, 8, 0)
 world.collisions[1] = 2
 scan()
 checkRadar("vehicle touching us is not a radar target either", {})
+
+reset()
+-- Oncoming traffic is not a lead. Same lane, coming the other way at 20 m/s.
+addVehicle(2, 0, 40, 0, {vel = {0, -20, 0}, yaw = math.pi})
+scan()
+checks = checks + 1
+if sentRadar and #sentRadar == 5 then
+  print("  ok    oncoming traffic is filtered out")
+else
+  failures = failures + 1
+  print("  FAIL  oncoming traffic is filtered out\n          got " .. tostring(sentRadar and #sentRadar) .. " bytes, wanted 5")
+end
+
+reset()
+-- ...but a car facing the other way and NOT MOVING is a broken-down vehicle in
+-- our lane, which is exactly the thing to brake for.
+addVehicle(2, 0, 40, 0, {vel = {0, 0, 0}, yaw = math.pi})
+scan()
+checkRadar("a stationary car facing us is still reported",
+           {{id = 2, dRel = 35.5, yRel = 0.0, vRel = -20.0}})
+
+reset()
+addVehicle(2, 0, 40, 0)
+world.rayHit = 10.0    -- something solid 10m away, well short of the target
+scan()
+checks = checks + 1
+if sentRadar and #sentRadar == 5 then
+  print("  ok    a target with no line of sight is dropped")
+else
+  failures = failures + 1
+  print("  FAIL  a target with no line of sight is dropped\n          got "
+        .. tostring(sentRadar and #sentRadar) .. " bytes, wanted 5")
+end
+
+reset()
+addVehicle(2, 0, 40, 0)
+world.rayHit = 500.0   -- clear all the way past it
+scan()
+checkRadar("a target with clear line of sight is kept",
+           {{id = 2, dRel = 35.5, yRel = 0.0, vRel = 0.0}})
+
+reset()
+addVehicle(2, 0, 40, 0)
+pendingControl = '{"engaged": false, "radar": {"enabled": 1.0, "occlusion": 0.0}}'
+world.rayHit = 10.0
+scan()
+checkRadar("occlusion can be switched off", {{id = 2, dRel = 35.5, yRel = 0.0, vRel = 0.0, tol = 0.4}})
+
+reset()
+addVehicle(2, 0, 40, 0)
+pendingControl = '{"engaged": false, "radar": {"enabled": 1.0, "noiseM": 0.5, "noiseMs": 0.0}}'
+scan()
+do
+  checks = checks + 1
+  local got = decodeRadar(sentRadar)
+  local d = got and got[1] and got[1][2]
+  -- Noisy, but bounded by the noise setting and never wildly wrong.
+  if d and math.abs(d - 35.5) <= 0.5 then
+    print(string.format("  ok    range noise stays within its bound (%.2f vs 35.50)", d))
+  else
+    failures = failures + 1
+    print("  FAIL  range noise stays within its bound: got " .. tostring(d))
+  end
+end
 
 -- Hand the last packet to the Python side so the wire format is checked across
 -- both languages, not just against itself.

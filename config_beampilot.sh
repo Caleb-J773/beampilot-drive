@@ -43,7 +43,12 @@ export BEAMPILOT_MAX_LAT_JERK="8.0"    # m/s^3, how fast it may change curvature
 # Stock is 2x. Lower it to tighten the net; it can never drop below stock.
 # export BEAMPILOT_ACTUATION_MARGIN="2.0"
 
-# --- Slowing down for corners ----------------------------------------------
+# --- Slowing down for corners (EXPERIMENTAL) --------------------------------
+# Off by default. This adds a planning layer stock openpilot does not have, so
+# it is worth comparing against not having it rather than assuming it is
+# better: drive the same road with it on and off. It is also the only feature
+# here that changes longitudinal behaviour on its own, with no feed from the
+# mod involved.
 # Stock openpilot holds the set speed through a bend. It caps ACCELERATION once
 # already cornering, but nothing ever brakes for a corner ahead. That is fine on
 # a real car with a wide camera and a driver watching; here the model's view is
@@ -56,7 +61,7 @@ export BEAMPILOT_MAX_LAT_JERK="8.0"    # m/s^3, how fast it may change curvature
 # below, and asks for the deceleration that gets there by the time the corner
 # arrives. It is OFFERED to the planner, not imposed: a lead car or the cruise
 # setpoint still win when they are more restrictive.
-export BEAMPILOT_CURVE_SLOWDOWN="1"
+export BEAMPILOT_CURVE_SLOWDOWN="0"
 
 # The lateral acceleration to aim for in a corner. Defaults to 0.7x the hard
 # lateral limit -- arriving at exactly the limit leaves the steering saturated
@@ -135,6 +140,13 @@ export BEAMPILOT_STEER_LOCK_DEG="500"
 
 # Lock-to-lock sweep time. Lower is snappier but twitchier.
 export BEAMPILOT_STEER_SWEEP_SECONDS="0.15"
+
+# Report the real gear to openpilot. car_events.py raises wrongGear/reverseGear
+# off it, which is what stops openpilot engaging while the car rolls backwards
+# -- correct for driving, wrong if reversing under openpilot is the point
+# (arcade mode, or messing about in a car park). 0 pins the gear to drive,
+# which is what the bridge did before it read the real one.
+export BEAMPILOT_REPORT_GEAR="1"
 
 # Cruise keys, single letters. Check BeamNG's settings/inputmaps/keyboard.json
 # for conflicts before rebinding -- a key bound on both sides does both things.
@@ -243,7 +255,7 @@ export BEAMPILOT_SIGNAL_AUTO_CANCEL="1"
 # detection falls back entirely on the camera. The same camera that, per the
 # README, is fed wide-lens intrinsics for an image that is not wide. How far
 # away the car in front is happens to be exactly what that gets wrong.
-export BEAMPILOT_RADAR="1"
+export BEAMPILOT_RADAR="0"
 
 # Let a ground-truth track become the lead on its own, with no confirmation
 # from the camera. Stock openpilot refuses to, because a real radar returns
@@ -253,16 +265,34 @@ export BEAMPILOT_RADAR="1"
 # fixing is the model missing a lead entirely, which is the one the stock gate
 # blocks. Set to 0 for stock fusion, where ground truth can only refine a lead
 # the camera already found.
-export BEAMPILOT_RADAR_LEADS="1"
+export BEAMPILOT_RADAR_LEADS="0"
 
 # How far off the model's predicted path a track may sit and still count as
 # being in our lane. Compared against the path, not against straight ahead, so
 # it follows the road round a bend.
 # export BEAMPILOT_RADAR_LEAD_HALF_WIDTH_M="1.8"
 
-# export BEAMPILOT_RADAR_RANGE_M="150"        # about as far as real radar reaches
-# export BEAMPILOT_RADAR_HALF_WIDTH_M="4.5"   # beam half-width at the bumper...
-# export BEAMPILOT_RADAR_SPREAD="0.12"        # ...growing per metre of range
+# How much of the cheating to give back. mapmgr knows where every vehicle is,
+# through hills and buildings, with exact velocities -- that is not a radar, it
+# is omniscience, and openpilot behaves unrealistically well on it.
+# export BEAMPILOT_RADAR_ONCOMING="0"         # report oncoming traffic. Off by default:
+#                                             # an approaching car is not a lead, and
+#                                             # treating one as such is a hard-braking
+#                                             # event for nothing. A STATIONARY car
+#                                             # facing you IS still reported -- that is
+#                                             # a breakdown in your lane.
+# export BEAMPILOT_RADAR_OCCLUSION="1"        # drop anything with no line of sight
+#                                             # (static geometry only, so a car does not
+#                                             # hide the car behind it)
+# export BEAMPILOT_RADAR_NOISE_M="0.12"       # range noise; real radar is not exact
+# export BEAMPILOT_RADAR_NOISE_MS="0.06"      # range-rate noise
+# export BEAMPILOT_RADAR_RANGE_M="110"        # shorter than real radar reaches, on
+#                                             # purpose: the camera would never have
+#                                             # seen a lead at 150m, so handing openpilot
+#                                             # one makes it start managing distance far
+#                                             # earlier than it otherwise would
+# export BEAMPILOT_RADAR_HALF_WIDTH_M="3.0"   # beam half-width at the bumper...
+# export BEAMPILOT_RADAR_SPREAD="0.07"        # ...growing per metre of range
 # export BEAMPILOT_RADAR_MAX_TRACKS="12"
 # export BEAMPILOT_RADAR_RATE_HZ="20"         # DT_MDL; radard runs at the model's rate
 # export BEAMPILOT_RADAR_PORT="49155"         # mod -> card, loopback only
@@ -437,8 +467,8 @@ export BEAMPILOT_BSM_WIDTH_M="3.6"
 export BEAMPILOT_BSM_REAR_M="4.0"
 export BEAMPILOT_BSM_DEBUG="0"
 export BEAMPILOT_RADAR_LEAD_HALF_WIDTH_M="1.8"
-export BEAMPILOT_RADAR_RANGE_M="150"
-export BEAMPILOT_RADAR_HALF_WIDTH_M="4.5"
+export BEAMPILOT_RADAR_RANGE_M="110"
+export BEAMPILOT_RADAR_HALF_WIDTH_M="3.0"
 export BEAMPILOT_RADAR_MAX_TRACKS="12"
 export BEAMPILOT_RADAR_DEBUG="0"
 export BEAMPILOT_TICK_HZ="100"
@@ -449,3 +479,6 @@ export BEAMPILOT_LAUNCH_DELAY="0"
 
 # --- added by tools/beampilot_tui.py ---
 export BEAMPILOT_ACTUATION_MARGIN="2.0"
+
+# --- added by tools/beampilot_tui.py ---
+export BEAMPILOT_CURVE_LAT_ACCEL="2.1"
