@@ -58,7 +58,7 @@ def gpu_options() -> list[str]:
       pass
   try:
     lspci = subprocess.run(["lspci"], capture_output=True, text=True, timeout=5)
-    if lspci.returncode == 0 and re.search(r"VGA.*(AMD|ATI|Radeon)", lspci.stdout, re.I):
+    if lspci.returncode == 0 and re.search(r"VGA.*\b(AMD|ATI|Radeon)\b", lspci.stdout, re.I):
       opts.append("amd")
   except (subprocess.SubprocessError, OSError):
     pass
@@ -78,7 +78,7 @@ def gpu_detail() -> str:
     lspci = subprocess.run(["lspci"], capture_output=True, text=True, timeout=5)
     if lspci.returncode == 0:
       for line in lspci.stdout.splitlines():
-        if re.search(r"VGA.*(AMD|ATI|Radeon)", line, re.I):
+        if re.search(r"VGA.*\b(AMD|ATI|Radeon)\b", line, re.I):
           names.append(line.split(":", 2)[-1].strip())
   except (subprocess.SubprocessError, OSError):
     pass
@@ -144,9 +144,13 @@ def build_sections() -> list[Section]:
               "lua", choices=["lua", "joystick"]),
     ]),
     Section("Camera", "beamcamd captures the BeamNG window off your desktop.", [
-      Setting("BEAMPILOT_CAM_MONITOR", "Monitor", "Which monitor to capture. 1 is the first.", "1", choices=["1", "2", "3", "0"]),
+      Setting("BEAMPILOT_CAM_WINDOW", "Track window",
+              "Match text for the BeamNG window; it follows the window as it moves or resizes. Blank = capture a whole monitor. Needs X11 and xdotool.",
+              "beamng"),
+      Setting("BEAMPILOT_CAM_MONITOR", "Monitor",
+              "Fallback when no window is tracked or found. 1 is the first monitor.", "1", choices=["1", "2", "3", "0"]),
       Setting("BEAMPILOT_CAM_REGION", "Capture region",
-              "left,top,width,height for a windowed BeamNG. Blank captures the whole monitor.", ""),
+              "left,top,width,height. Overrides both of the above with a fixed rectangle.", ""),
     ]),
     Section("Alerts", "What openpilot complains about. See the README before turning these off.", [
       Setting("BEAMPILOT_IGNORE_COMM_ISSUE", "Ignore comm issues",

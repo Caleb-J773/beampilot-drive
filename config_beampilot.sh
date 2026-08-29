@@ -24,18 +24,28 @@ export SKIP_FW_QUERY="1"
 # MAX_LAT_ACCEL / v^2, so stock 3.0 allows only a ~300m radius at 67mph.
 #   3.0 = stock/comfort   5.0 = spirited   8.0+ = approaching real tire grip
 export BEAMPILOT_MAX_LAT_ACCEL="5.0"    # m/s^2
-export BEAMPILOT_MAX_LAT_JERK="8.0"     # m/s^3, how fast it may change curvature
+export BEAMPILOT_MAX_LAT_JERK="8.0"    # m/s^3, how fast it may change curvature
 # export BEAMPILOT_MAX_CURVATURE="0.2"  # 1/m, geometric cap; only binds below ~11mph
 #
 # LONGITUDINAL (accel/braking), as a multiplier on the stock envelope.
-export BEAMPILOT_ACCEL_SCALE="2.0"      # 1.0 = stock (1.6 m/s^2 from a stop)
-export BEAMPILOT_DECEL_SCALE="1.5"      # 1.0 = stock (-1.2 m/s^2 cruise braking)
+export BEAMPILOT_ACCEL_SCALE="2.0"    # 1.0 = stock (1.6 m/s^2 from a stop)
+export BEAMPILOT_DECEL_SCALE="1.5"    # 1.0 = stock (-1.2 m/s^2 cruise braking)
 # ---------------------------------------------------------------------------
+
+# Camera capture. Priority: CAM_REGION > CAM_WINDOW > CAM_MONITOR.
+# CAM_WINDOW tracks the BeamNG window by name/class and follows it as it moves
+# or resizes, so the game can be windowed and you keep a monitor free for the
+# openpilot UI. Needs X11 and xdotool; falls back to monitor capture without
+# them. Windows whose class looks like a terminal/editor/browser are ignored,
+# so a terminal with "beamng" in the title isn't captured by mistake.
+export BEAMPILOT_CAM_WINDOW="beamng"
+# export BEAMPILOT_CAM_MONITOR="1"
+# export BEAMPILOT_CAM_REGION="0,0,1920,1080"
 
 # Your BeamNG vehicle's steering lock, in degrees. Per-vehicle: hold full lock
 # and read steering_wheel_deg in tools/beampilot_monitor.py to find yours.
 # Too low makes openpilot oversteer, too high makes it run wide.
-export BEAMPILOT_STEER_LOCK_DEG="510.0"
+export BEAMPILOT_STEER_LOCK_DEG="500"
 
 # Lock-to-lock sweep time. Lower is snappier but twitchier.
 export BEAMPILOT_STEER_SWEEP_SECONDS="0.15"
@@ -81,7 +91,7 @@ export HSA_ENABLE_DXG_DETECTION=1
 # AMD iGPU compute needs the user in the `render` group (not set up here);
 # using the RTX 3060 instead -- confirmed present and in host/nvidia mode.
 # export USE_AMD=1
-export USE_NV=1
+export USE_NV="1"
 
 # tici (c3 big) vs mici (c4 small)
 # do 1 for tici, 0 for mici
@@ -109,3 +119,7 @@ export BIG="1"
 # usbgpu_tg_flags), regardless of USE_NV/USE_AMD above. Leave this 0 unless you
 # actually have a comma Chestnut USB eGPU plugged in.
 export CHESTNUT="0"
+
+# --- added by tools/beampilot_tui.py ---
+export BEAMPILOT_CONTROL_MODE="lua"
+export BEAMPILOT_CAM_MONITOR="1"

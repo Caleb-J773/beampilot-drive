@@ -9,6 +9,7 @@ from openpilot.cereal import messaging
 from openpilot.common.realtime import Ratekeeper
 from msgq.visionipc import VisionIpcServer
 from openpilot.system.camerad.cameras.nv12_info import get_nv12_info
+from openpilot.selfdrive.beamcamd.window_capture import capture_support, find_window
 
 # Captures the BeamNG.drive window off the X11 desktop (the openpilot_cam BeamNG
 # mod, auto-selected by the beampilot_bridge protocol Lua, guarantees this is the
@@ -30,10 +31,27 @@ TR = [1.0, 0.0, 0.0,
 
 
 def get_capture_region(sct: mss.MSS) -> dict:
+  """Explicit region > tracked window > whole monitor.
+
+  Window tracking is the nicest option when it works (a windowed, moved or
+  resized BeamNG still gets captured, and you keep a second monitor free for
+  the openpilot UI), but it needs X11 and xdotool, so it degrades to a plain
+  monitor grab rather than failing.
+  """
   region_env = os.environ.get("BEAMPILOT_CAM_REGION")
   if region_env:
     left, top, width, height = (int(v) for v in region_env.split(","))
     return {"left": left, "top": top, "width": width, "height": height}
+
+  match = os.environ.get("BEAMPILOT_CAM_WINDOW", "").strip()
+  if match:
+    win = find_window(match)
+    if win is not None:
+      print(f"[beamcamd] tracking window {win['id']} ({win['name']!r}, matched by {win['how']}):"
+            + f" {win['width']}x{win['height']} at +{win['left']}+{win['top']}", flush=True)
+      return {k: win[k] for k in ("left", "top", "width", "height")}
+    print(f"[beamcamd] no window matching {match!r} found --"
+          + " is BeamNG running? falling back to monitor capture", flush=True)
 
   monitor_idx = int(os.environ.get("BEAMPILOT_CAM_MONITOR", "1"))
   return sct.monitors[monitor_idx]
@@ -106,13 +124,37 @@ def main():
 
   pm = messaging.PubMaster(["wideRoadCameraState", "narrowRoadCameraState"])
 
+  usable, explanation = capture_support()
+  print(f"[beamcamd] {explanation}", flush=True)
+  if not usable:
+    print("[beamcamd] cannot capture the screen; frames will be blank", flush=True)
+
   sct = mss.mss()
   region = get_capture_region(sct)
 
   rate = Ratekeeper(20, print_delay_threshold=None)
   frame_id = 0
 
+  # When tracking a window, re-read its geometry occasionally so moving or
+  # resizing the game (or alt-tabbing it fullscreen) doesn't leave us grabbing
+  # a stale rectangle. Every 2s rather than every frame: xdotool is a process
+  # spawn, which is far too expensive at 20Hz.
+  track_window = bool(os.environ.get("BEAMPILOT_CAM_WINDOW", "").strip()) and \
+                 not os.environ.get("BEAMPILOT_CAM_REGION")
+  retrack_interval = 2.0
+  last_retrack = time.monotonic()
+
   while True:
+    if track_window and (time.monotonic() - last_retrack) > retrack_interval:
+      last_retrack = time.monotonic()
+      win = find_window(os.environ.get("BEAMPILOT_CAM_WINDOW", "").strip())
+      if win is not None:
+        new_region = {k: win[k] for k in ("left", "top", "width", "height")}
+        if new_region != region:
+          print(f"[beamcamd] window moved/resized -> {new_region['width']}x{new_region['height']}"
+                + f" at +{new_region['left']}+{new_region['top']}", flush=True)
+          region = new_region
+
     shot = sct.grab(region)
     bgra = np.frombuffer(shot.raw, dtype=np.uint8).reshape(shot.height, shot.width, 4)
     # Downsize BEFORE color conversion, not after: resize_nearest's
