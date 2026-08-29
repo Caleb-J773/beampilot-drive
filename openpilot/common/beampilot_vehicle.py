@@ -142,7 +142,7 @@ LIMITS = {
 }
 
 
-def lua_config(calibrate: bool = True) -> dict[str, float]:
+def lua_config(calibrate: bool = True, calibration_key: str = "") -> dict[str, float | str]:
   """Geometry-reporting tuning pushed down to the mod in the control packet.
 
   Keys mirror VEHICLE_DEFAULTS in beampilot.lua. Vehicle Lua cannot read this
@@ -169,6 +169,10 @@ def lua_config(calibrate: bool = True) -> dict[str, float]:
     # vehicle and rack is already remembered -- there is nothing to learn, and a
     # wheel that moves by itself every single spawn would be a nuisance.
     "calibrate": 1.0 if (calibrate and env_bool("BEAMPILOT_STEER_CALIBRATE", True)) else 0.0,
+    # A positive flag alone is not enough: the mod verifies this cache key
+    # against the vehicle and rack it measured before moving the wheel. This
+    # prevents the pre-identification startup packet from authorizing a sweep.
+    "calibrateKey": calibration_key if calibrate else "",
     "calibrateSeconds": env_float("BEAMPILOT_STEER_CALIBRATE_SECONDS", 2.5),
     # Fraction of full lock. Short of the stops on purpose: the last few degrees
     # are where the rack binds and the linkage stops being linear.
@@ -439,8 +443,9 @@ class VehicleGeometryReceiver:
         continue
       name, values, samples = decoded
       self.last_packet = time.monotonic()
+      crossed_cache_threshold = self.samples < RATIO_CACHE_MIN_SAMPLES <= samples
       self.samples = samples
-      if name != self.name or self._materially_different(values):
+      if name != self.name or self._materially_different(values) or crossed_cache_threshold:
         self.name, self.values = name, values
         changed = True
       else:

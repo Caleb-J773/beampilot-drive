@@ -31,6 +31,12 @@ MOD_FEATURES = {
   "beampilot_bridge": {
     "blind spot monitoring (BSM)":
       ("lua/vehicle/protocols/beampilot.lua", "BSM_DEFAULTS"),
+    "wide-camera FOV control":
+      ("lua/vehicle/protocols/beampilot.lua", "CAMERA_DEFAULTS"),
+  },
+  "openpilot_cam": {
+    "runtime narrow/wide lens control":
+      ("lua/ge/extensions/core/cameraModes/openpilot.lua", "93.619537"),
   },
 }
 
@@ -459,6 +465,21 @@ def check_beamng():
     print(f"  {FAIL} userfolder not found -- launch BeamNG.drive once, then re-run this")
     return None, None
 
+  # BeamNG mounts every directory directly under mods/unpacked. Older setup
+  # versions moved a replaced copy to NAME.replaced-TIMESTAMP in that same
+  # directory, accidentally keeping the backup active. Duplicate Lua paths are
+  # load-order dependent; a stale openpilot_cam there can silently replace the
+  # live symlink and pin the old FOV.
+  unpacked = os.path.join(userdir, "mods", "unpacked")
+  try:
+    active_backups = [entry for entry in os.listdir(unpacked)
+                      if any(entry.startswith(f"{name}.replaced-") for name in MODS)]
+  except OSError:
+    active_backups = []
+  for entry in sorted(active_backups):
+    print(f"  {FAIL} stale backup is still an ACTIVE BeamNG mod: {entry}")
+    print(f"      {DIM}move it to {os.path.join(userdir, 'beampilot-mod-backups')}{RESET}")
+
   missing = []
   for name in MODS:
     mod = os.path.join(userdir, "mods", "unpacked", name)
@@ -512,9 +533,14 @@ def install_mods(userdir, names):
           # Moved aside rather than deleted: it is the user's game folder, and
           # a copy may hold edits they made in place before learning it was not
           # the repo.
-          backup = f"{mod}.replaced-{time.strftime('%Y%m%d-%H%M%S')}"
+          # Never put a backup beside the active mod: BeamNG mounts every
+          # directory under mods/unpacked, regardless of its suffix.
+          backup_root = os.path.join(userdir, "beampilot-mod-backups")
+          os.makedirs(backup_root, exist_ok=True)
+          backup = os.path.join(backup_root,
+                                f"{name}.replaced-{time.strftime('%Y%m%d-%H%M%S')}")
           shutil.move(mod, backup)
-          print(f"      {DIM}old copy moved to {os.path.basename(backup)}{RESET}")
+          print(f"      {DIM}old copy moved to {backup}{RESET}")
       os.symlink(src, mod)
       print(f"  {OK} linked {name} -> {src}")
     except OSError as e:

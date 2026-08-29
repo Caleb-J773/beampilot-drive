@@ -16,6 +16,7 @@ from opendbc.car.honda.values import CruiseButtons
 from openpilot.common.beampilot_limits import ACCEL_MAX as ACCEL_MAX_SCALED
 from openpilot.common.beampilot_limits import ACCEL_MIN as ACCEL_MIN_SCALED
 from openpilot.common.beampilot_env import env_bool, env_float, env_int, env_str
+from openpilot.common.beampilot_camera import lua_config as camera_lua_config
 from openpilot.common.beampilot_bsm import (BSM_ENABLED, BlindSpotSender,
                                             flags_from_dash_lights, resolve)
 from openpilot.common.beampilot_bsm import lua_config as bsm_lua_config
@@ -687,10 +688,36 @@ class BeamNGBridge:
       return True
     if self.geometry is None:
       return False
-    if "steerRatio" in self.geometry.values:
-      return True
     lock = self.geometry.values.get("steerLockDeg", 0.0)
-    return bool(lock) and self.ratio_cache.get(self.geometry.name, lock) is not None
+    if bool(lock) and self.ratio_cache.get(self.geometry.name, lock) is not None:
+      return True
+    # The Lua side starts reporting a usable *live* ratio at its much lower
+    # minSamples threshold. It is not settled until it reaches the threshold
+    # this process will persist; stopping the sweep on that first thin packet
+    # left no cache entry and made the same car calibrate again next launch.
+    return "steerRatio" in self.geometry.values and self.geometry.samples >= RATIO_CACHE_MIN_SAMPLES
+
+  def ratio_calibration_needed(self) -> bool:
+    """Request a sweep only after the current vehicle/rack is identifiable.
+
+    The first config packet used to request calibration before the first
+    geometry packet had arrived. That made even a cached vehicle begin a sweep
+    for up to a second, until beamngd finally learned its name and lock. Waiting
+    for those two stable cache-key fields turns startup into a small handshake:
+    identify first, then ask only an actually unknown rack to measure itself.
+    """
+    if self.geometry is None or "steerRatio" in env_overrides():
+      return False
+    lock = self.geometry.values.get("steerLockDeg", 0.0)
+    if not lock or not SteerRatioCache.usable_name(self.geometry.name):
+      return False
+    return not self.ratio_is_known()
+
+  def ratio_calibration_key(self) -> str:
+    """The exact vehicle/rack key Lua must match before moving the wheel."""
+    if not self.ratio_calibration_needed():
+      return ""
+    return SteerRatioCache.key(self.geometry.name, self.geometry.values["steerLockDeg"])
 
   def refresh_vehicle_model(self, force: bool = False):
     """(Re)build the VehicleModel from CarParams plus any measured geometry.
@@ -878,10 +905,17 @@ class BeamNGBridge:
     if self.bsm_config_due():
       payload["bsm"] = bsm_lua_config()
       payload["radar"] = radar_lua_config()
+      # BeamNG is a separate process and cannot see config_beampilot.sh. Carry
+      # the selected lens over the existing, backwards-compatible JSON control
+      # path; an older mod simply ignores this extra object. Re-sending it with
+      # the other tuning also restores the FOV after Ctrl+L or a vehicle reload.
+      payload["camera"] = camera_lua_config()
       # Only ask for a calibration sweep if we do not already know this
       # vehicle and rack. Nothing to learn otherwise, and a steering wheel that
       # moves by itself on every spawn gets old fast.
-      payload["vehicle"] = vehicle_lua_config(calibrate=not self.ratio_is_known())
+      calibration_key = self.ratio_calibration_key()
+      payload["vehicle"] = vehicle_lua_config(calibrate=bool(calibration_key),
+                                              calibration_key=calibration_key)
     if self.signal_cancel_ticks > 0:
       payload["cancelSignal"] = self.signal_cancel_side
       self.signal_cancel_ticks -= 1

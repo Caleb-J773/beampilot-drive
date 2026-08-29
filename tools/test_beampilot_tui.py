@@ -123,7 +123,8 @@ class DefaultsMatchTheCode(unittest.TestCase):
     for key in ("BEAMPILOT_REPORT_GEAR", "BEAMPILOT_RADAR", "BEAMPILOT_BSM",
                 "BEAMPILOT_CURVE_SLOWDOWN", "BEAMPILOT_RADAR_LEADS",
                 "BEAMPILOT_BSM_INDICATOR", "BEAMPILOT_RADAR_INDICATOR",
-                "BEAMPILOT_SIGNAL_AUTO_CANCEL", "BEAMPILOT_LANE_CHANGE_ABORT"):
+                "BEAMPILOT_SIGNAL_AUTO_CANCEL", "BEAMPILOT_LANE_CHANGE_ABORT",
+                "BEAMPILOT_CAMERA_MODE"):
       self.assertIn(key, self.settings, f"{key} has no row in the setup screen")
 
   def test_on_off_settings_offer_both(self):

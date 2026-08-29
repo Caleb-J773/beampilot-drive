@@ -128,6 +128,53 @@ local RADAR_DEFAULTS = {
 
 local RADAR_MAX_TRACKS = 24 -- must match MAX_TRACKS in beampilot_radar.py
 
+-- The screen capture process and BeamNG do not share an environment. beamngd
+-- therefore sends the lens selected by BEAMPILOT_CAMERA_MODE in the same JSON
+-- packet as the perception tuning. The GE-side openpilot camera owns the
+-- actual render FOV; vehicle Lua reaches it through queueGameEngineLua below.
+local CAMERA_DEFAULTS = {
+  fov = 25.698296, -- comma 3 narrow raw frame: 1208px high, focal length 2648px
+  autoPlace = 0,   -- wide mode can anchor outside this vehicle's front OOBB
+  height = 1.22,   -- metres above the vehicle OOBB bottom
+  clearance = 0.15,-- metres ahead of the vehicle OOBB front
+}
+local lastCameraConfig = nil
+
+local function applyCameraConfig(newCfg)
+  local fov = CAMERA_DEFAULTS.fov
+  local autoPlace = CAMERA_DEFAULTS.autoPlace
+  local height = CAMERA_DEFAULTS.height
+  local clearance = CAMERA_DEFAULTS.clearance
+  if type(newCfg) == "table" and type(newCfg.fov) == "number" then
+    fov = math.max(1, math.min(170, newCfg.fov))
+  end
+  if type(newCfg) == "table" and type(newCfg.autoPlace) == "number" then
+    autoPlace = newCfg.autoPlace ~= 0 and 1 or 0
+  end
+  if type(newCfg) == "table" and type(newCfg.height) == "number" then
+    height = math.max(0.2, math.min(5, newCfg.height))
+  end
+  if type(newCfg) == "table" and type(newCfg.clearance) == "number" then
+    clearance = math.max(0.02, math.min(2, newCfg.clearance))
+  end
+  -- OPENPILOT_CAM is created by the GE-side camera mod. Config is re-sent
+  -- every two seconds, so arriving before that camera has initialized is safe.
+  obj:queueGameEngineLua(string.format(
+    "if type(OPENPILOT_CAM) == 'table' then OPENPILOT_CAM.fov = %.8f; "
+      .. "OPENPILOT_CAM.autoPlace = %d; OPENPILOT_CAM.wideHeight = %.4f; "
+      .. "OPENPILOT_CAM.wideClearance = %.4f end; "
+      .. "if core_camera and core_camera.setFOV then core_camera.setFOV(0, %.8f) end",
+    fov, autoPlace, height, clearance, fov))
+  local configKey = string.format("%.3f|%d|%.3f|%.3f", fov, autoPlace, height, clearance)
+  if configKey ~= lastCameraConfig then
+    local placement = autoPlace ~= 0 and "vehicle-front adaptive" or "legacy fixed offsets"
+    log("I", "", string.format(
+      "beampilot: camera %.2f deg vertical, %s (height %.2fm, clearance %.2fm)",
+      fov, placement, height, clearance))
+    lastCameraConfig = configKey
+  end
+end
+
 -- ---------------------------------------------------------------------------
 -- Vehicle geometry: telling openpilot what car it is actually driving.
 --
@@ -169,7 +216,10 @@ local VEHICLE_DEFAULTS = {
   -- racks are parts rather than car properties, so any table would be wrong the
   -- moment a different one is fitted -- and it could never cover a mod or a
   -- custom config at all. A car that measures itself covers all of them.
-  calibrate = 1,
+  -- Default-deny: beamngd authorizes a sweep only after receiving this spawn's
+  -- stable vehicle name and steering lock and finding no matching cache entry.
+  calibrate = 0,
+  calibrateKey = "",       -- exact "vehicle|rounded-lock" authorization token
   calibrateSeconds = 2.5,   -- one full triangle sweep, both directions
   calibrateAmplitude = 0.55,-- fraction of full lock; short of the stops
   calibrateMaxSpeed = 0.8,  -- m/s. Only ever while stopped.
@@ -303,6 +353,8 @@ local function applyConfig(target, defaults, cfg)
       target[k] = v
     elseif type(v) == "boolean" then
       target[k] = v and 1 or 0
+    elseif type(v) == "string" and type(default) == "string" then
+      target[k] = v
     else
       target[k] = default -- absent means "back to the default", not "keep the old one"
     end
@@ -581,6 +633,11 @@ local function vehicleSampleSteerRatio()
   steerSamples = steerSamples + 1
 end
 
+local function vehicleCalibrationKey()
+  if not vehicleStatic or vehicleName == "" then return "" end
+  return vehicleName .. "|" .. tostring(math.floor(vehicleStatic.steerLockDeg + 0.5))
+end
+
 -- Sweep the rack while parked and read the ratio straight off it, instead of
 -- waiting for the driver to happen to turn far enough. Two and a half seconds,
 -- once per vehicle, and the answer is then cached on the openpilot side for
@@ -596,7 +653,23 @@ end
 -- aborts the moment either stops being true. A rack that turns by itself while
 -- parked is surprising; one that does it at speed would be dangerous.
 local function vehicleCalibrate(dtSim)
-  if vehicleCfg.calibrate == 0 or calPhase == "done" then return end
+  if calPhase == "done" then return end
+  -- Calibration is actuation, so fail closed. The key proves beamngd has
+  -- already received this spawn's identity and checked this exact rack against
+  -- its persistent cache. A plain startup/default `calibrate=1` can no longer
+  -- move anything. Revoking permission during a sweep also actively releases
+  -- the rack instead of leaving the last input.event value held indefinitely.
+  local authorized = vehicleCfg.calibrate ~= 0
+      and vehicleCfg.calibrateKey ~= ""
+      and vehicleCfg.calibrateKey == vehicleCalibrationKey()
+  if not authorized then
+    if calPhase == "sweeping" then
+      input.event("steering", 0, FILTER_DIRECT)
+      calPhase, calElapsed = "idle", 0
+      log("I", "", "beampilot: steering calibration authorization withdrawn; wheel released")
+    end
+    return
+  end
   if steerSamples >= vehicleCfg.cacheMinSamples and calPhase == "idle" then
     calPhase = "done"   -- measured from ordinary driving, and solidly enough
     return              -- that openpilot will keep it; nothing left to do
@@ -975,12 +1048,14 @@ local function init()
     controlSocket = nil
   end
   cameraSelected = false
+  lastCameraConfig = nil
 end
 
 local function reset()
   lastControlAt = nil
   isControlling = false
   cameraSelected = false
+  lastCameraConfig = nil
   bsmLeft, bsmRight = false, false
   bsmLeftApproach, bsmRightApproach = false, false
   radarCount = 0
@@ -1079,6 +1154,7 @@ local function pollControl()
     -- vehicle reload picks the settings back up on its own.
     if decoded and type(msg.bsm) == "table" then applyBsmConfig(msg.bsm) end
     if decoded and type(msg.radar) == "table" then applyRadarConfig(msg.radar) end
+    if decoded and type(msg.camera) == "table" then applyCameraConfig(msg.camera) end
     if decoded and type(msg.vehicle) == "table" then
       applyVehicleConfig(msg.vehicle)
       lastConfigAt = os.clock()

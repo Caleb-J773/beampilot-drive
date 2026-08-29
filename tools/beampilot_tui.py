@@ -448,6 +448,33 @@ def build_sections() -> list[Section]:
               "0", choices=["0", "1"]),
     ]),
     Section("Camera", "beamcamd captures the BeamNG window off your desktop.", [
+      Setting("BEAMPILOT_CAMERA_MODE", "Road-camera mode",
+              "narrow renders the calibrated 25.70 deg view, publishes only narrowRoad, and lets"
+              + " modeld use its supported single-camera path. wide_crop renders a calibrated 93.62"
+              + " deg wide view: the full image feeds wideRoad and a centred angular crop feeds"
+              + " narrowRoad. That is the experimental one-render approximation for trying openpilot"
+              + " Experimental mode; its enlarged narrow crop has less detail than a separate camera.",
+              "narrow", choices=["narrow", "wide_crop"],
+              warn="wide_crop is experimental and needs in-game validation",
+              value_labels={"narrow": "narrow (default)",
+                            "wide_crop": "wide + narrow crop (experimental)"}),
+      Setting("BEAMPILOT_WIDE_CAMERA_PLACEMENT", "Wide-camera placement",
+              "vehicle_front measures the spawned car's own bounding box and puts the wide lens"
+              + " just ahead of its front edge, so a different JBeam reference-node position cannot"
+              + " put the camera in the cabin or bonnet. legacy keeps openpilot_cam's fixed"
+              + " offFwd/offUp pose. This only changes wide_crop; narrow keeps its tuned pose.",
+              "vehicle_front", choices=["vehicle_front", "legacy"],
+              value_labels={"vehicle_front": "adaptive per vehicle",
+                            "legacy": "legacy fixed offsets"}),
+      Setting("BEAMPILOT_WIDE_CAMERA_HEIGHT_M", "Wide camera height (m)",
+              "Height above the bottom of that vehicle's bounding box. 1.22 matches the approximate"
+              + " comma device height assumed by the model. Raise only if an unusual vehicle still"
+              + " intersects the lens.",
+              "1.22", numeric=True, step=0.05),
+      Setting("BEAMPILOT_WIDE_CAMERA_CLEARANCE_M", "Wide front clearance (m)",
+              "How far ahead of the vehicle's frontmost bounding plane to put the wide lens."
+              + " Increase slightly if a mod vehicle has bodywork outside its spawn bounds.",
+              "0.15", numeric=True, step=0.05),
       Setting("BEAMPILOT_CAPTURE_BACKEND", "Capture backend",
               "auto picks X11 grabbing on X11 and the desktop portal on Wayland. portal asks you to"
               + " pick the window once (a share dialog, remembered afterwards) and streams it over"
@@ -458,8 +485,8 @@ def build_sections() -> list[Section]:
       Setting("BEAMPILOT_CAM_ASPECT", "Aspect handling",
               "openpilot's frame is 1.596 wide; a full-screen 16:9 window is 1.778, so the picture gets"
               + " squeezed ~11% horizontally and everything reads as closer to the centre of the lane"
-              + " than it is. crop trims the sides first, leaving exactly the 40.01 deg the model's"
-              + " intrinsics assume. stretch is the old behaviour. Better than either: size the BeamNG"
+              + " than it is. crop trims the sides first, matching the selected narrow or wide lens's"
+              + " intrinsics. stretch is the old behaviour. Better than either: size the BeamNG"
               + " window 1928x1208, then nothing is cropped OR resampled.",
               "crop", choices=["crop", "stretch"]),
       Setting("BEAMPILOT_CAM_WINDOW", "Track window",

@@ -17,12 +17,19 @@ arithmetic, both directions, including the case cropping cannot fix.
 import math
 import unittest
 
-from openpilot.selfdrive.beamcamd.beamcamd import crop_region_to_aspect
+import numpy as np
 
-W, H = 1928, 1208
+from openpilot.common import beampilot_camera as camera
+from openpilot.common.beampilot_camera import (FRAME_HEIGHT, FRAME_WIDTH, NARROW_FOCAL_LENGTH,
+                                               NARROW_HORIZONTAL_FOV, NARROW_VERTICAL_FOV,
+                                               WIDE_FOCAL_LENGTH, WIDE_HORIZONTAL_FOV,
+                                               WIDE_VERTICAL_FOV, narrow_crop_bounds)
+from openpilot.selfdrive.beamcamd.beamcamd import FrameEncoder, crop_region_to_aspect, narrow_view_from_wide
+
+W, H = FRAME_WIDTH, FRAME_HEIGHT
 FRAME_ASPECT = W / H
-VERTICAL_FOV = 25.70          # degrees; what the openpilot_cam mod renders
-NARROW_H_FOV = 40.01          # degrees; what dc.narrow_road.intrinsics describe
+VERTICAL_FOV = NARROW_VERTICAL_FOV
+NARROW_H_FOV = NARROW_HORIZONTAL_FOV
 
 
 def horizontal_fov(aspect: float, vertical_fov: float = VERTICAL_FOV) -> float:
@@ -96,6 +103,98 @@ class TestPortalPipelineRatio(unittest.TestCase):
     # aspectratiocrop wants an integer fraction; 1928x1208 reduces exactly.
     self.assertEqual(aspect_ratio_fraction(W, H), "241/151")
     self.assertAlmostEqual(241 / 151, FRAME_ASPECT, places=9)
+
+
+class TestWideCropGeometry(unittest.TestCase):
+  def test_fovs_come_from_openpilot_intrinsics(self):
+    self.assertAlmostEqual(NARROW_VERTICAL_FOV, 25.698296, places=6)
+    self.assertAlmostEqual(NARROW_HORIZONTAL_FOV, 40.007903, places=6)
+    self.assertAlmostEqual(WIDE_VERTICAL_FOV, 93.619537, places=6)
+    self.assertAlmostEqual(WIDE_HORIZONTAL_FOV, 119.074105, places=6)
+
+  def test_native_crop_is_even_aligned_and_centred(self):
+    left, top, width, height = narrow_crop_bounds(W, H)
+    self.assertEqual((left, top, width, height), (758, 474, 412, 258))
+    self.assertEqual((left % 2, top % 2, width % 2, height % 2), (0, 0, 0, 0))
+    self.assertLessEqual(abs(left - (W - left - width)), 2)
+    self.assertLessEqual(abs(top - (H - top - height)), 2)
+
+  def test_crop_angles_match_the_narrow_lens_after_pixel_rounding(self):
+    _, _, width, height = narrow_crop_bounds(W, H)
+    cropped_h_fov = math.degrees(2 * math.atan((width / 2) / WIDE_FOCAL_LENGTH))
+    cropped_v_fov = math.degrees(2 * math.atan((height / 2) / WIDE_FOCAL_LENGTH))
+    self.assertAlmostEqual(cropped_h_fov, NARROW_HORIZONTAL_FOV, delta=0.08)
+    self.assertAlmostEqual(cropped_v_fov, NARROW_VERTICAL_FOV, delta=0.08)
+
+  def test_crop_scale_is_the_ratio_of_the_two_focal_lengths(self):
+    ideal_width = W * WIDE_FOCAL_LENGTH / NARROW_FOCAL_LENGTH
+    ideal_height = H * WIDE_FOCAL_LENGTH / NARROW_FOCAL_LENGTH
+    _, _, width, height = narrow_crop_bounds(W, H)
+    self.assertAlmostEqual(width, ideal_width, delta=1)
+    self.assertAlmostEqual(height, ideal_height, delta=1)
+
+  def test_numpy_crop_returns_the_expected_view(self):
+    frame = np.arange(H * W, dtype=np.uint32).reshape(H, W)
+    view = narrow_view_from_wide(frame)
+    self.assertEqual(view.shape, (258, 412))
+    self.assertTrue(np.shares_memory(frame, view))
+    self.assertEqual(view[0, 0], frame[474, 758])
+    self.assertEqual(view[-1, -1], frame[731, 1169])
+
+  def test_portal_nv12_crop_keeps_chroma_alignment(self):
+    # At 8x8 the focal-length ratio rounds to an even 2x2 crop at +2+2.
+    # Give that crop unique constant Y/U/V values: resizing it should fill the
+    # whole output with those values, proving UV was cropped on its 2x2 grid.
+    w = h = 8
+    y = np.zeros((h, w), dtype=np.uint8)
+    uv = np.zeros((h // 2, w), dtype=np.uint8)
+    left, top, crop_w, crop_h = narrow_crop_bounds(w, h)
+    y[top:top + crop_h, left:left + crop_w] = 77
+    uv[top // 2:(top + crop_h) // 2, left:left + crop_w:2] = 99
+    uv[top // 2:(top + crop_h) // 2, left + 1:left + crop_w:2] = 155
+    tight = np.concatenate((y.ravel(), uv.ravel())).tobytes()
+    encoder = FrameEncoder(w, h, w, h, h // 2, w * h, w * h * 3 // 2)
+
+    encoder.encode_nv12_center_crop(tight)
+
+    self.assertTrue(np.all(encoder.y_view[:h, :w] == 77))
+    self.assertTrue(np.all(encoder.uv_view[:h // 2, 0:w:2] == 99))
+    self.assertTrue(np.all(encoder.uv_view[:h // 2, 1:w:2] == 155))
+
+
+class TestBeamNGCameraConfig(unittest.TestCase):
+  def setUp(self):
+    self.saved = (camera.WIDE_CROP_ENABLED, camera.CAPTURE_VERTICAL_FOV,
+                  camera.WIDE_CAMERA_PLACEMENT, camera.WIDE_CAMERA_HEIGHT_M,
+                  camera.WIDE_CAMERA_CLEARANCE_M)
+
+  def tearDown(self):
+    (camera.WIDE_CROP_ENABLED, camera.CAPTURE_VERTICAL_FOV,
+     camera.WIDE_CAMERA_PLACEMENT, camera.WIDE_CAMERA_HEIGHT_M,
+     camera.WIDE_CAMERA_CLEARANCE_M) = self.saved
+
+  def test_narrow_mode_keeps_legacy_pose(self):
+    camera.WIDE_CROP_ENABLED = False
+    camera.CAPTURE_VERTICAL_FOV = NARROW_VERTICAL_FOV
+    camera.WIDE_CAMERA_PLACEMENT = camera.WIDE_CAMERA_PLACEMENT_VEHICLE_FRONT
+    cfg = camera.lua_config()
+    self.assertEqual(cfg["autoPlace"], 0.0)
+    self.assertAlmostEqual(cfg["fov"], NARROW_VERTICAL_FOV)
+
+  def test_wide_mode_sends_per_vehicle_anchor(self):
+    camera.WIDE_CROP_ENABLED = True
+    camera.CAPTURE_VERTICAL_FOV = WIDE_VERTICAL_FOV
+    camera.WIDE_CAMERA_PLACEMENT = camera.WIDE_CAMERA_PLACEMENT_VEHICLE_FRONT
+    camera.WIDE_CAMERA_HEIGHT_M = 1.3
+    camera.WIDE_CAMERA_CLEARANCE_M = 0.2
+    cfg = camera.lua_config()
+    self.assertEqual(cfg, {"fov": WIDE_VERTICAL_FOV, "autoPlace": 1.0,
+                           "height": 1.3, "clearance": 0.2})
+
+  def test_legacy_option_disables_adaptive_anchor(self):
+    camera.WIDE_CROP_ENABLED = True
+    camera.WIDE_CAMERA_PLACEMENT = camera.WIDE_CAMERA_PLACEMENT_LEGACY
+    self.assertEqual(camera.lua_config()["autoPlace"], 0.0)
 
 
 if __name__ == "__main__":

@@ -10,13 +10,20 @@ from openpilot.cereal.visionipc import VisionStreamType
 from openpilot.cereal import messaging
 from msgq.visionipc import VisionIpcServer
 from openpilot.system.camerad.cameras.nv12_info import get_nv12_info
+from openpilot.common.beampilot_camera import (CAMERA_MODE, CAMERA_MODE_INVALID, CAMERA_MODES,
+                                               CAPTURE_HORIZONTAL_FOV, CAPTURE_VERTICAL_FOV,
+                                               FRAME_HEIGHT, FRAME_WIDTH, WIDE_CROP_ENABLED,
+                                               narrow_crop_bounds)
 from openpilot.common.beampilot_env import env_float, env_int, env_str
 from openpilot.selfdrive.beamcamd.window_capture import capture_support, find_window, window_geometry
 
 # Captures the BeamNG.drive window off the X11 desktop (the openpilot_cam BeamNG
 # mod, auto-selected by the beampilot_bridge protocol Lua, guarantees this is the
 # rigidly-mounted, FOV-matched forward camera view, not a driver-controlled one)
-# and republishes it as openpilot's road cameras.
+# and republishes it as openpilot's road camera(s). In the default ``narrow``
+# mode modeld uses its supported single-camera path. In ``wide_crop`` BeamNG
+# renders a genuinely wide lens once; the full frame becomes wideRoad and a
+# centred angular crop becomes narrowRoad.
 #
 # What gets captured, highest priority first (see get_capture_region):
 #   BEAMPILOT_CAM_REGION   "left,top,width,height" -- a fixed rectangle.
@@ -57,14 +64,14 @@ CAPTURE_BACKEND = os.environ.get("BEAMPILOT_CAPTURE_BACKEND", "auto").strip().lo
 #
 # The encoder resizes whatever it grabs straight to 1928x1208, which is an
 # aspect of 1.5960. A full-screen 16:9 window is 1.7778, so the picture gets
-# squeezed horizontally by ~11%. Vertically it is fine -- the mod sets a
-# VERTICAL fov of 25.70 degrees, matching openpilot's road camera -- but the
-# horizontal field then spans 44.15 degrees while the intrinsics the model
-# applies claim 40.01. Everything therefore reads as ~11% closer to the centre
-# of the lane than it is, at every distance, all the time.
+# squeezed horizontally by ~11%. Vertically it is fine -- the mod sets the
+# calibrated VERTICAL fov -- but the horizontal field no longer matches the
+# intrinsics for whichever lens BEAMPILOT_CAMERA_MODE selected. Everything
+# therefore reads as closer to the centre of the lane than it is, at every
+# distance, all the time.
 #
 #   crop    (default) trim the sides to 1.5960 before scaling. The remaining
-#           field is exactly 40.01 degrees, which is what the intrinsics say.
+#           field matches the selected narrow or wide lens's intrinsics.
 #           Costs the outer ~11% of the view, which was never described by any
 #           calibration anyway.
 #   stretch the previous behaviour: scale the whole rectangle, distortion and
@@ -96,7 +103,7 @@ def crop_region_to_aspect(region: dict, aspect: float) -> dict:
 
   Only ever trims the SIDES. A rectangle that is already narrower than the
   target cannot be fixed this way: cropping top and bottom would cut the
-  vertical field below the 25.70 degrees the mod renders and the intrinsics
+  vertical field below the calibrated FOV the mod renders and the intrinsics
   assume, trading a horizontal error for a worse vertical one. Those are
   returned untouched, and main() says so once.
   """
@@ -112,6 +119,16 @@ def crop_region_to_aspect(region: dict, aspect: float) -> dict:
     "width": target,
     "height": height,
   }
+
+
+def narrow_view_from_wide(frame: np.ndarray) -> np.ndarray:
+  """Return the centred pixels whose angles match the narrow lens.
+
+  This is a view, not a copy. FrameEncoder resizes it straight into its
+  preallocated destination, so the X11 path adds no per-frame garbage.
+  """
+  left, top, width, height = narrow_crop_bounds(frame.shape[1], frame.shape[0])
+  return frame[top:top + height, left:left + width]
 
 
 def clamp_region(region: dict, bounds: dict) -> dict | None:
@@ -220,15 +237,20 @@ class FrameEncoder:
 
     self.small = np.empty((h, w, 4), dtype=np.uint8)
     self.i420 = np.empty((h + h // 2, w), dtype=np.uint8)
+    # Scratch planes for deriving narrowRoad from an already-converted portal
+    # wide frame. Kept here for the same allocation-free steady-state promise.
+    self.crop_y = np.empty((h, w), dtype=np.uint8)
+    self.crop_u = np.empty((h // 2, w // 2), dtype=np.uint8)
+    self.crop_v = np.empty((h // 2, w // 2), dtype=np.uint8)
 
-  def encode(self, bgra: np.ndarray) -> np.ndarray:
+  def encode(self, bgra: np.ndarray, interpolation: int = cv2.INTER_NEAREST) -> np.ndarray:
     # Downsize BEFORE colour conversion, not after: the resize cost scales with
     # the OUTPUT size, so shrinking first means the (much more expensive)
     # colour conversion only ever touches the model's resolution instead of the
     # full captured monitor. cv2.resize is SIMD-optimized C++ under the hood --
     # ~48x faster than a numpy fancy-indexing gather for the same
     # nearest-neighbour result.
-    cv2.resize(bgra, (self.w, self.h), dst=self.small, interpolation=cv2.INTER_NEAREST)
+    cv2.resize(bgra, (self.w, self.h), dst=self.small, interpolation=interpolation)
 
     # cv2 has no direct BGRA->NV12 code, only planar I420/YV12, so convert to
     # I420 (Y, then U, then V as separate blocks) and interleave U/V into NV12's
@@ -258,6 +280,31 @@ class FrameEncoder:
     uv = np.frombuffer(tight, dtype=np.uint8, count=(h // 2) * w, offset=w * h).reshape(h // 2, w)
     self.y_view[:h, :w] = y
     self.uv_view[:h // 2, :w] = uv
+    return self.out
+
+  def encode_nv12_center_crop(self, tight: bytes) -> np.ndarray:
+    """Turn the centre of a native-size wide NV12 frame into narrowRoad.
+
+    Cropping happens in the Y and subsampled UV planes so the portal path does
+    not round-trip through RGB. ``narrow_crop_bounds`` keeps every boundary
+    even, preserving NV12's 2x2 chroma alignment.
+    """
+    h, w = self.h, self.w
+    y = np.frombuffer(tight, dtype=np.uint8, count=w * h).reshape(h, w)
+    uv = np.frombuffer(tight, dtype=np.uint8, count=(h // 2) * w, offset=w * h).reshape(h // 2, w)
+    left, top, crop_w, crop_h = narrow_crop_bounds(w, h)
+
+    cv2.resize(y[top:top + crop_h, left:left + crop_w], (w, h),
+               dst=self.crop_y, interpolation=cv2.INTER_LINEAR)
+    uv_crop = uv[top // 2:(top + crop_h) // 2, left:left + crop_w]
+    cv2.resize(uv_crop[:, 0::2], (w // 2, h // 2),
+               dst=self.crop_u, interpolation=cv2.INTER_LINEAR)
+    cv2.resize(uv_crop[:, 1::2], (w // 2, h // 2),
+               dst=self.crop_v, interpolation=cv2.INTER_LINEAR)
+
+    self.y_view[:h, :w] = self.crop_y
+    self.uv_view[:h // 2, 0:w:2] = self.crop_u
+    self.uv_view[:h // 2, 1:w:2] = self.crop_v
     return self.out
 
 
@@ -306,7 +353,7 @@ class FramePacer:
       self.next_frame += self.interval
 
 
-def _publish(server, pm, nv12, frame_id: int):
+def _publish(server, pm, narrow_nv12, frame_id: int, wide_nv12=None):
   # Real monotonic-clock timestamp, matching cereal's own logMonoTime
   # (time.monotonic()) -- NOT a synthetic frame_id*dt counter. modeld derives
   # cameraOdometry.timestampEof from this, and locationd's _validate_timestamp
@@ -317,27 +364,20 @@ def _publish(server, pm, nv12, frame_id: int):
   # it's just never exercised there since that driver is disabled here).
   timestamp = time.monotonic_ns()
 
-  # KNOWN LIMITATION: the same frame goes to BOTH streams, so openpilot's
-  # "wide" camera is really a second copy of the narrow view. modeld sets
-  # has_wide_camera = use_extra_client or main_wide_camera (modeld.py), which
-  # is True here, so it applies dc.wide_road.intrinsics -- the calibration for
-  # a ~120 degree lens -- to an image that doesn't have that field of view.
-  # The model therefore misjudges how far objects and lane lines sit off to
-  # the sides, which shows up most in turns, where the real wide camera is
-  # what normally sees around the corner. Keep Experimental mode OFF: its
-  # end-to-end longitudinal policy leans much harder on wide-camera scene
-  # understanding. Fixing this properly needs a second BeamNG camera at a
-  # genuinely wide FOV published to VISION_STREAM_WIDE_ROAD.
-  server.send(VisionStreamType.VISION_STREAM_WIDE_ROAD, nv12, frame_id, timestamp, timestamp)
-  server.send(VisionStreamType.VISION_STREAM_NARROW_ROAD, nv12, frame_id, timestamp, timestamp)
-
-  # update cereal (wide road)
-  dat = messaging.new_message("wideRoadCameraState", valid=True)
-  msg = {"frameId": frame_id, "transform": TR, "sensor": "unknown"}
-  dat.wideRoadCameraState = msg
-  pm.send("wideRoadCameraState", dat)
+  # Creating a wide VisionIPC buffer is itself how modeld detects a two-camera
+  # device. Therefore narrow mode omits the stream completely; merely going
+  # quiet on an existing buffer would not select modeld's single-camera path.
+  # wide_crop supplies two geometrically distinct images from one synchronized
+  # render, so both streams intentionally share this timestamp and frame id.
+  if wide_nv12 is not None:
+    server.send(VisionStreamType.VISION_STREAM_WIDE_ROAD, wide_nv12, frame_id, timestamp, timestamp)
+    dat = messaging.new_message("wideRoadCameraState", valid=True)
+    msg = {"frameId": frame_id, "transform": TR, "sensor": "unknown"}
+    dat.wideRoadCameraState = msg
+    pm.send("wideRoadCameraState", dat)
 
   # update cereal (narrow road)
+  server.send(VisionStreamType.VISION_STREAM_NARROW_ROAD, narrow_nv12, frame_id, timestamp, timestamp)
   dat = messaging.new_message("narrowRoadCameraState", valid=True)
   msg = {"frameId": frame_id, "transform": TR, "sensor": "unknown"}
   dat.narrowRoadCameraState = msg
@@ -384,19 +424,35 @@ def main():
   # openpilot's model input resolution. Not a capture setting -- the captured
   # region is rescaled to this regardless of your monitor size, and modeld
   # expects exactly these dimensions, so don't change them to "match" a display.
-  W, H = 1928, 1208
+  W, H = FRAME_WIDTH, FRAME_HEIGHT
 
   server = VisionIpcServer("camerad")
   stride, y_height, uv_height, size = get_nv12_info(W, H)
   uv_offset = stride * y_height
 
-  server.create_buffers_with_sizes(VisionStreamType.VISION_STREAM_WIDE_ROAD, VIPC_BUFFER_COUNT, W, H, size, stride, uv_offset)
+  if WIDE_CROP_ENABLED:
+    server.create_buffers_with_sizes(VisionStreamType.VISION_STREAM_WIDE_ROAD, VIPC_BUFFER_COUNT, W, H, size, stride, uv_offset)
   server.create_buffers_with_sizes(VisionStreamType.VISION_STREAM_NARROW_ROAD, VIPC_BUFFER_COUNT, W, H, size, stride, uv_offset)
   server.create_buffers_with_sizes(VisionStreamType.VISION_STREAM_CABIN, 4, W, H, size, stride, uv_offset)
 
   server.start_listener()
 
-  pm = messaging.PubMaster(["wideRoadCameraState", "narrowRoadCameraState"])
+  camera_services = ["narrowRoadCameraState"]
+  if WIDE_CROP_ENABLED:
+    camera_services.append("wideRoadCameraState")
+  pm = messaging.PubMaster(camera_services)
+
+  if CAMERA_MODE_INVALID:
+    print(f"[beamcamd] BEAMPILOT_CAMERA_MODE is invalid; expected one of {CAMERA_MODES},"
+          + " using 'narrow'", flush=True)
+  if WIDE_CROP_ENABLED:
+    left, top, crop_w, crop_h = narrow_crop_bounds(W, H)
+    print(f"[beamcamd] camera mode: wide_crop -- BeamNG {CAPTURE_VERTICAL_FOV:.2f} deg vertical;"
+          + f" wideRoad uses the full frame, narrowRoad uses {crop_w}x{crop_h}"
+          + f" at +{left}+{top}", flush=True)
+  else:
+    print(f"[beamcamd] camera mode: {CAMERA_MODE} -- one {CAPTURE_VERTICAL_FOV:.2f} deg"
+          + " narrowRoad stream (modeld single-camera path)", flush=True)
 
   usable, explanation = capture_support()
   print(f"[beamcamd] {explanation}", flush=True)
@@ -404,7 +460,8 @@ def main():
     print("[beamcamd] cannot capture the screen; frames will be blank", flush=True)
 
   backend = choose_capture_backend()
-  encoder = FrameEncoder(W, H, stride, y_height, uv_height, uv_offset, size)
+  narrow_encoder = FrameEncoder(W, H, stride, y_height, uv_height, uv_offset, size)
+  wide_encoder = FrameEncoder(W, H, stride, y_height, uv_height, uv_offset, size) if WIDE_CROP_ENABLED else None
   sct = region = tracked_id = None
   portal_session = portal_source = None
 
@@ -453,13 +510,14 @@ def main():
         need = int(round(rect["height"] * frame_aspect))
         print(f"[beamcamd] the capture is {rect['width']}x{rect['height']}, narrower than openpilot's"
               + f" {frame_aspect:.4f} frame; cropping cannot fix that without cutting the vertical"
-              + f" field below 25.70 degrees. Widen the window to {need}px (or size it 1928x1208)"
-              + " to get exact geometry.", flush=True)
+              + f" field below {CAPTURE_VERTICAL_FOV:.2f} degrees. Widen the window to {need}px"
+              + " (or size it 1928x1208) to get exact geometry.", flush=True)
     elif "cropped" not in aspect_reported:
       aspect_reported.add("cropped")
       print(f"[beamcamd] aspect: cropping {rect['width']}x{rect['height']} ->"
             + f" {cropped['width']}x{cropped['height']} so the resize is uniform"
-            + " -- horizontal field is now 40.01 deg, matching the intrinsics openpilot applies."
+            + f" -- horizontal field is now {CAPTURE_HORIZONTAL_FOV:.2f} deg, matching the"
+            + " selected lens intrinsics."
             + " Set BEAMPILOT_CAM_ASPECT=stretch for the old behaviour.", flush=True)
     return cropped
 
@@ -541,20 +599,26 @@ def main():
     if backend == "portal":
       tight = portal_source.read()
       if tight is not None:
-        nv12 = encoder.encode_nv12(tight)
+        if WIDE_CROP_ENABLED:
+          wide_nv12 = wide_encoder.encode_nv12(tight)
+          narrow_nv12 = narrow_encoder.encode_nv12_center_crop(tight)
+        else:
+          wide_nv12 = None
+          narrow_nv12 = narrow_encoder.encode_nv12(tight)
         grab_errors = 0
       else:
         # No frame yet. A compositor legitimately sends nothing while the
         # source is occluded or idle, so only a dead GStreamer is an error.
-        nv12 = encoder.out
+        wide_nv12 = wide_encoder.out if wide_encoder is not None else None
+        narrow_nv12 = narrow_encoder.out
         if not portal_source.alive():
           grab_errors += 1
           if grab_errors == 1:
             tail = portal_source.stderr_tail()
             print("[beamcamd] the PipeWire capture pipeline exited"
                   + (f":\n{tail}" if tail else " (no output)"), flush=True)
-      _warn_if_blank(encoder, frame_id, backend)
-      _publish(server, pm, nv12, frame_id)
+      _warn_if_blank(wide_encoder or narrow_encoder, frame_id, backend)
+      _publish(server, pm, narrow_nv12, frame_id, wide_nv12)
       frame_id += 1
       if frame_id == 1:
         pacer.reset()
@@ -587,15 +651,21 @@ def main():
 
     if shot is not None:
       bgra = np.frombuffer(shot.raw, dtype=np.uint8).reshape(shot.height, shot.width, 4)
-      nv12 = encoder.encode(bgra)
+      if WIDE_CROP_ENABLED:
+        wide_nv12 = wide_encoder.encode(bgra)
+        narrow_nv12 = narrow_encoder.encode(narrow_view_from_wide(bgra), interpolation=cv2.INTER_LINEAR)
+      else:
+        wide_nv12 = None
+        narrow_nv12 = narrow_encoder.encode(bgra)
     else:
       # Keep publishing the last good frame at the normal rate rather than
       # going quiet: openpilot registers commIssue as both NO_ENTRY and
       # SOFT_DISABLE, so a gap in the camera stream disengages it mid-drive.
-      nv12 = encoder.out
+      wide_nv12 = wide_encoder.out if wide_encoder is not None else None
+      narrow_nv12 = narrow_encoder.out
 
-    _warn_if_blank(encoder, frame_id, backend)
-    _publish(server, pm, nv12, frame_id)
+    _warn_if_blank(wide_encoder or narrow_encoder, frame_id, backend)
+    _publish(server, pm, narrow_nv12, frame_id, wide_nv12)
 
     # update frame count / id
     frame_id += 1

@@ -23,7 +23,8 @@ It works with the normal Steam version. No BeamNG.tech, no `beamngpy`.
 
 **It steers, holds a set speed, brakes for traffic, and changes lanes when you signal.** It is
 also not polished: the steering geometry is calibrated for a Honda Civic rather than whatever car
-you spawn, there's no real wide-angle camera, and it will drive into things if you let it.
+you spawn, the experimental wide camera is a crop from one render rather than separate hardware,
+and it will drive into things if you let it.
 
 ## Contents
 
@@ -183,7 +184,7 @@ uv run python tools/beampilot_tui.py
 <details>
 <summary>What the TUI does</summary>
 
-Groups all 57 settings under Hardware / Car / Driving limits / Controls / Blind spot / Radar /
+Groups all 71 settings under Hardware / Car / Driving limits / Controls / Blind spot / Radar /
 Camera / Alerts / Bridge, with an explanation of each and what the stock openpilot value is.
 Detects your GPUs via `nvidia-smi` and `lspci` and only offers backends this machine has.
 
@@ -400,9 +401,10 @@ Stock openpilot **holds the set speed through a bend** — in *chill* mode. In *
 mode** it doesn't: end-to-end longitudinal means the model plans the speed itself and
 [does slow for turns](https://blog.comma.ai/090release/). That's the answer to "why does it
 sometimes seem to" — either Experimental mode is on, or you're feeling the acceleration cap
-(`a_x = sqrt(a_total² − a_y²)`) make it coast rather than brake. This README tells you to keep
-Experimental **off** because of the wide-camera problem, which is precisely why chill mode's
-lack of curve braking is worth filling in.
+(`a_x = sqrt(a_total² − a_y²)`) make it coast rather than brake. To exercise that policy, select
+the experimental `wide_crop` road-camera mode described under
+[Camera capture](#camera-capture). With the default `narrow` camera mode, chill mode plus this
+optional curve planner remains the more conservative setup.
  It caps acceleration once already
 cornering (`a_x = sqrt(a_total² − a_y²)`), but nothing ever brakes for a corner ahead. On a real
 car that's fine — the wide camera sees round it and a driver is watching. Here the model's view
@@ -662,6 +664,10 @@ Too low makes openpilot oversteer, too high makes it run wide.
 | `BEAMPILOT_SIGNAL_AUTO_CANCEL` | `1` | Switch the blinker off once a lane change finishes. |
 | `BEAMPILOT_RADAR` | `0` | Ground-truth lead detection. See [below](#ground-truth-radar). |
 | `BEAMPILOT_CONTROL_MODE` | `lua` | `lua` or `joystick`. |
+| `BEAMPILOT_CAMERA_MODE` | `narrow` | `narrow` or experimental `wide_crop`. See [Camera capture](#camera-capture). |
+| `BEAMPILOT_WIDE_CAMERA_PLACEMENT` | `vehicle_front` | In `wide_crop`, derive a per-car anchor from its oriented bounds; `legacy` keeps fixed offsets. |
+| `BEAMPILOT_WIDE_CAMERA_HEIGHT_M` | `1.22` | Adaptive wide-lens height above the vehicle bounds' bottom. |
+| `BEAMPILOT_WIDE_CAMERA_CLEARANCE_M` | `0.15` | Adaptive wide-lens distance ahead of the vehicle bounds' front. |
 | `BEAMPILOT_CAM_ASPECT` | `crop` | `crop` or `stretch`. See [Aspect ratio](#aspect-ratio). |
 | `BEAMPILOT_CAM_WINDOW` | `beamng` | Track the game window by name/class. See [Camera capture](#camera-capture). |
 | `BEAMPILOT_CAM_MONITOR` | `1` | Whole-monitor fallback. |
@@ -751,9 +757,9 @@ and a mod installed as a *copy* rather than a symlink doesn't follow `git pull`.
 ### Ground-truth radar
 
 `HONDA_CIVIC_2022` is radarless, so opendbc hands `radard` an **empty** `RadarData` at 20 Hz and
-lead detection runs on the camera alone — the camera that's fed the wrong intrinsics (see
-[No wide-angle camera](#no-wide-angle-camera)). Distance to the car in front is exactly what that
-gets wrong.
+lead detection runs on the camera alone. See
+[Experimental single-render wide camera](#experimental-single-render-wide-camera) for the camera
+tradeoffs; radar distance is still useful because it does not depend on image depth estimation.
 
 The mod emits real radar points on the same scan as BSM, straight to `card.py`, which fills them
 into the `RadarData` it was already publishing. Everything downstream is stock `radard`.
@@ -826,24 +832,24 @@ ground truth or the camera.
 <tr>
 <td width="50%" valign="top">
 
-#### 🟢 Recommended
+#### 🟢 Narrow mode tested
 
 **ETK 800 · ETK I · ETK K**
 
-The camera framing was tuned against these. The hood sits where the model
-expects it, and the view isn't clipped.
+The legacy narrow-camera framing was tuned against these. The hood sits where
+the model expects it, and the view isn't clipped.
 
 Start here if you want it to just work.
 
 </td>
 <td width="50%" valign="top">
 
-#### 🟡 Works, with caveats
+#### 🟡 Narrow mode, caveats
 
 **Bastion · SBR4 · Sunburst**
 
-Drive fine, but show less of the hood and the view clips slightly — the
-camera offsets are fixed, not per-vehicle.
+Drive fine, but narrow mode can show a different amount of hood or clip slightly
+because its legacy pose still uses fixed offsets.
 
 Expect to tune before these feel as good.
 
@@ -859,8 +865,9 @@ thing to check.
 | What | Where | Symptom if wrong |
 |---|---|---|
 | Steering lock and ratio | measured by the mod; `BEAMPILOT_STEER_LOCK_DEG` / `BEAMPILOT_STEER_RATIO` to pin | Oversteers (too low) or runs wide (too high) |
-| Camera height | `offUp` in `openpilot_cam` | Misjudges distance — the model assumes ~1.22 m |
-| Camera fore/aft | `offFwd` | Too much or too little hood in frame |
+| Wide camera height | `BEAMPILOT_WIDE_CAMERA_HEIGHT_M` | Misjudges distance — the model assumes ~1.22 m |
+| Wide camera fore/aft | `BEAMPILOT_WIDE_CAMERA_CLEARANCE_M` | Bodywork at the extreme edge on unusual mod vehicles |
+| Narrow camera height / fore-aft | `offUp` / `offFwd` in `openpilot_cam` | Too much or too little hood in the legacy narrow view |
 | Lateral offset | `offRight` | Tracks consistently to one side of the lane |
 
 The camera mod lives at
@@ -868,16 +875,16 @@ The camera mod lives at
 live — reload with <kbd>Ctrl</kbd>+<kbd>L</kbd> in game.
 
 > [!NOTE]
-> **Outside the ETK series the framing is off.** Other cars show less of the hood and the view is
-> clipped slightly, because `openpilot_cam`'s offsets are fixed rather than per-vehicle. It still
-> drives, but the model has less of the visual context it was trained on. If a car behaves badly,
-> that framing is the first thing to suspect — nudge `offUp`/`offFwd` in
-> `tools/beamng_mod/openpilot_cam/lua/ge/extensions/core/cameraModes/openpilot.lua`.
+> In `wide_crop`, the default `vehicle_front` placement measures the current vehicle's undeformed
+> oriented bounds once and puts the lens ahead of the complete body at the model's expected camera
+> height. This avoids cabin/bonnet clipping across different reference-node layouts. Narrow mode
+> deliberately retains the existing tuned pose; use `offUp`/`offFwd` in the camera mod if a
+> particular car needs narrow-only tuning.
 
-The camera also sits noticeably **off-centre** on some cars. The mod places it relative to
-`veh:getPosition()`, which returns the vehicle's jbeam reference node — and that node isn't
-reliably on the centreline, so where the camera lands varies per vehicle. A real comma three is
-mounted near the rear-view mirror, and the model was trained from roughly there.
+The narrow camera can also sit noticeably **off-centre** on some cars. Its legacy pose is relative
+to `veh:getPosition()`, which returns the vehicle's JBeam reference node, and that node is not
+reliably on the centreline. Adaptive wide placement gets its fore/aft and vertical anchor from the
+whole bounding box; `offRight` remains an explicit lateral trim.
 
 It drives surprisingly well anyway. Lane positioning is learned from the whole scene rather than
 from the camera sitting at one exact spot, so a lateral offset mostly shifts where the car sits in
@@ -910,6 +917,33 @@ remove that call or switch cameras manually after it runs.
 </details>
 
 ### Camera capture
+
+First choose what lens and streams the camera mod supplies:
+
+| `BEAMPILOT_CAMERA_MODE` | BeamNG render | VisionIPC streams | Use |
+|---|---|---|---|
+| `narrow` (default) | 25.70° vertical / 40.01° horizontal | `narrowRoad` only | The clean, supported modeld single-camera path. No fake wide stream. |
+| `wide_crop` | 93.62° vertical / 119.07° horizontal | Full frame to `wideRoad`; centred 412×258 angular crop enlarged into `narrowRoad` | Experimental approximation for trying openpilot Experimental mode. |
+
+`wide_crop` does not ask BeamNG.drive to render two cameras. The existing rigid
+`openpilot_cam` mod changes to the real wide-lens FOV, and `beamcamd` derives the narrow input
+from the centre of that same frame. Both streams therefore describe the same instant and their
+intrinsics are correct. The cost is spatial detail: the narrow input begins with about 412×258
+source pixels before being enlarged. A genuine second BeamNG render would preserve narrow-camera
+detail, but BeamNG.drive's ordinary mod API does not offer the convenient multi-camera sensor API
+from BeamNG.tech, and a second visible viewport would add capture and synchronization complexity.
+
+The wide lens also uses adaptive per-vehicle placement by default. The mod projects all eight
+corners of `getSpawnWorldOOBB()` onto the vehicle's forward/up axes, then anchors the lens
+`BEAMPILOT_WIDE_CAMERA_CLEARANCE_M` ahead of the front plane and
+`BEAMPILOT_WIDE_CAMERA_HEIGHT_M` above the bottom plane. Because a 119° horizontal lens sees less
+than 180°, the complete body remains behind it instead of filling the lower frame or clipping into
+an interior. Set `BEAMPILOT_WIDE_CAMERA_PLACEMENT=legacy` to compare against the old fixed pose.
+
+Changing the TUI setting takes effect on the next beampilot launch. `beamngd` sends the selected
+FOV to the camera mod over the existing control connection every two seconds, so it also recovers
+after <kbd>Ctrl</kbd>+<kbd>L</kbd> or a vehicle reload. Once `wide_crop` is running, Experimental
+mode itself is still selected with openpilot's on-road Experimental button/toggle.
 
 First, how the screen is read at all:
 
@@ -957,9 +991,10 @@ you can confirm it's about to grab the right thing.
 `beamcamd` resizes whatever it captures straight to **1928×1208** (aspect **1.596**). A
 full-screen 16:9 window is **1.778**, so the picture arrives squeezed ~11% horizontally.
 
-Vertically it's fine: the mod renders a 25.70° **vertical** field, matching openpilot's road
-camera. Horizontally a 16:9 window spans **44.15°** while the intrinsics claim **40.01°**, so
-everything reads as ~11% closer to the centre of the lane than it is.
+In the default narrow mode, vertically it's fine: the mod renders a 25.70° **vertical** field,
+matching openpilot's road camera. Horizontally a 16:9 window spans **44.15°** while the intrinsics
+claim **40.01°**, so everything reads as ~11% closer to the centre of the lane than it is.
+`wide_crop` has the same aspect-ratio requirement; its correct horizontal field is 119.07°.
 
 This depends on the window's *shape*, not its size — 1440p is exactly as affected as 1080p:
 
@@ -971,14 +1006,15 @@ This depends on the window's *shape*, not its size — 1440p is exactly as affec
 | 2560×1600 (16:10) | 1.600 | 40.10° | +0.2% |
 | **1928×1208** | 1.596 | 40.01° | **0.0%** |
 
-`BEAMPILOT_CAM_ASPECT=crop` (default) trims the sides first, leaving exactly 40.01°. `stretch` is
-the old behaviour, kept so you can compare. On the portal backend the trim happens in the
-GStreamer pipeline via `aspectratiocrop`; if that element isn't installed, `beamcamd` says so and
-falls back to `stretch`.
+`BEAMPILOT_CAM_ASPECT=crop` (default) trims the sides first, leaving exactly 40.01° in `narrow`
+or 119.07° in `wide_crop`. `stretch` is the old behaviour, kept so you can compare. On the portal
+backend the trim happens in the GStreamer pipeline via `aspectratiocrop`; if that element isn't
+installed, `beamcamd` says so and falls back to `stretch`.
 
 > [!TIP]
-> **Best option: size the BeamNG window to 1928×1208.** Exact aspect, nothing cropped, nothing
-> resampled. Fits inside a 1440p screen.
+> **Best option: size the BeamNG window to 1928×1208.** Exact capture aspect; the full selected
+> lens needs no capture crop or resample. (`wide_crop` still enlarges its narrow angular crop by
+> design.) It fits inside a 1440p screen.
 
 A window *narrower* than 1.596 can't be fixed this way — cropping top and bottom would cut the
 vertical field instead. `beamcamd` leaves those alone and tells you how much wider to go.
@@ -1180,7 +1216,7 @@ integrates error — that's two integrators in series and a textbook growing osc
 | `accelerometer` / `gyroscope` | 100 Hz | `beamngd` | `sensors.ffiSensors`, angular velocity |
 | `gpsLocationExternal` | 10 Hz | `beamngd` | world position, projected to fake lat/lon |
 | `pandaStates` | 10 Hz | `beamngd` | mirrors real `carParams.safetyConfigs` |
-| `wideRoadCameraState` / `narrowRoadCameraState` | 20 Hz | `beamcamd` | the same captured frame (see [wide camera](#no-wide-angle-camera)) |
+| `narrowRoadCameraState` (plus `wideRoadCameraState` in `wide_crop`) | 20 Hz | `beamcamd` | narrow render, or full wide render plus its centred narrow crop (see [camera modes](#camera-capture)) |
 | `driverStateV2` / `driverMonitoringState` | ~20 Hz | `beamngd` | faked — driver monitoring is removed |
 | `carState` | 100 Hz | `card` *(stock)* | decodes our fake CAN |
 | `modelV2` | 20 Hz | `modeld` *(stock)* | the captured frames |
@@ -1437,24 +1473,22 @@ never runs there, since that driver is disabled.
 
 ## Known problems
 
-### No wide-angle camera
+### Experimental single-render wide camera
 
-openpilot expects two road cameras: a narrow one and a roughly 120° wide one. `beamcamd` has
-only the single game view, so it publishes **the same frame to both streams**. `modeld` computes
-`has_wide_camera = use_extra_client or main_wide_camera`, which is `True` here, so it applies
-`dc.wide_road.intrinsics` — a wide-lens calibration — to an image that doesn't have that field
-of view.
+The old pipeline published the 25.70° narrow image to both road streams. That was worse than
+having no wide stream: its existence made `modeld` apply wide-lens intrinsics to narrow-lens
+pixels. Default `BEAMPILOT_CAMERA_MODE=narrow` now publishes only `narrowRoad`, selecting
+modeld's supported single-camera fallback.
 
-The model therefore misjudges how far objects and lane lines sit laterally. **This is worst in
-turns**, where the real wide camera is what sees around the corner.
+Experimental `wide_crop` instead gives `wideRoad` a real 93.62° vertical / 119.07° horizontal
+render from the rigid BeamNG camera, then derives `narrowRoad` from the centre angles. Geometry
+and timing are coherent, and the wide view can see much farther around turns. It is still an
+approximation: the enlarged narrow input begins with only 412×258 pixels of source detail, and
+the two views are mathematically related rather than independent physical sensors.
 
-> [!WARNING]
-> **Keep Experimental mode off.** Its end-to-end longitudinal policy leans much harder on
-> wide-camera scene understanding and behaves noticeably worse here.
-
-Proper fix: a second BeamNG camera at a genuinely wide FOV published separately to
-`VISION_STREAM_WIDE_ROAD`. The existing `openpilot_cam` mod shows how to register a
-rigidly-mounted FOV-matched camera; this needs a second one plus a second capture region.
+Use `wide_crop` to try openpilot Experimental mode, but A/B it on the same route and watch the
+first runs. A true two-render implementation would preserve the narrow detail; it remains the
+quality upgrade if BeamNG.drive gains a practical synchronized off-screen viewport route.
 
 ### Steering geometry mismatch
 

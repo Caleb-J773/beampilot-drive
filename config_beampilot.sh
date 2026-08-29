@@ -61,10 +61,11 @@ export BEAMPILOT_MAX_LAT_JERK="8.0"    # m/s^3, how fast it may change curvature
 # mod involved.
 # Stock openpilot holds the set speed through a bend. It caps ACCELERATION once
 # already cornering, but nothing ever brakes for a corner ahead. That is fine on
-# a real car with a wide camera and a driver watching; here the model's view is
-# a 25.70 degree narrow one, so a corner arrives late and thin, and the raised
-# lateral limits above mean the car will carry a speed into a bend it then
-# cannot hold. The result is running wide at the entry.
+# a real car with a wide camera and a driver watching. In the default narrow
+# camera mode a corner arrives late and thin; wide_crop improves that view but
+# remains an experimental one-render approximation. Either way the raised
+# lateral limits above can let the car carry a speed into a bend it cannot
+# hold. The result is running wide at the entry.
 #
 # This reads the curvature the model has already predicted along its own path,
 # works out the fastest speed that keeps lateral acceleration at the target
@@ -103,6 +104,27 @@ export BEAMPILOT_DECEL_SCALE="1.5"    # 1.0 = stock (-1.2 m/s^2 cruise braking)
 # calibrationd keeps refining either way; this only sets the starting point.
 export BEAMPILOT_CALIBRATION="instant"
 
+# Camera lens / stream arrangement.
+#   narrow    (default) BeamNG renders the calibrated 25.70deg vertical road
+#             lens and beamcamd publishes only narrowRoad. modeld then uses its
+#             supported single-camera path; there is no fake duplicate-wide.
+#   wide_crop (experimental) BeamNG renders the calibrated 93.62deg wide lens.
+#             The full frame feeds wideRoad; a centred 412x258 angular crop,
+#             enlarged to the normal input size, feeds narrowRoad. This gives
+#             modeld both views from one perfectly synchronized render and is
+#             intended for trying openpilot Experimental mode. The narrow view
+#             necessarily has less angular detail than a separate narrow render.
+export BEAMPILOT_CAMERA_MODE="narrow"
+
+# Wide-camera placement. The default derives an anchor from each spawned
+# vehicle's undeformed oriented bounding box, keeping the complete body behind
+# the lens even when that vehicle's JBeam reference node is in an unusual spot.
+#   vehicle_front -- adaptive per-car anchor (recommended for wide_crop)
+#   legacy        -- the camera mod's fixed offFwd/offUp offsets
+export BEAMPILOT_WIDE_CAMERA_PLACEMENT="vehicle_front"
+export BEAMPILOT_WIDE_CAMERA_HEIGHT_M="1.22"    # height above OOBB bottom
+export BEAMPILOT_WIDE_CAMERA_CLEARANCE_M="0.15"    # distance ahead of OOBB front
+
 # Camera capture. Priority: CAM_REGION > CAM_WINDOW > CAM_MONITOR.
 # CAM_WINDOW tracks the BeamNG window by name/class and follows it as it moves
 # or resizes, so the game can be windowed and you keep a monitor free for the
@@ -128,10 +150,11 @@ export BEAMPILOT_CAPTURE_BACKEND="portal"
 # What to do when the captured rectangle is not the shape of openpilot's frame.
 # openpilot's is 1928x1208 = 1.5960; a full-screen 16:9 window is 1.7778, so the
 # picture is squeezed ~11% horizontally. Vertically it is fine (the mod renders
-# a 25.70 deg VERTICAL field, matching openpilot's road camera) but horizontally
-# it spans 44.15 deg where the intrinsics claim 40.01 -- so everything reads as
-# ~11% closer to the centre of the lane than it really is.
-#   crop    (default) trim the sides first. What is left is exactly 40.01 deg.
+# the selected lens's calibrated VERTICAL field) but horizontally it spans more
+# than that lens's intrinsics claim, so everything reads as closer to the centre
+# of the lane than it really is.
+#   crop    (default) trim the sides first. What remains is 40.01deg in narrow
+#           mode or 119.07deg in wide_crop, matching the selected intrinsics.
 #   stretch the old behaviour, kept so the change can be A/B'd.
 # Better than either: size the BeamNG window to 1928x1208. Then the aspect is
 # exact, nothing is cropped and nothing is resampled. It fits inside 1440p.
@@ -202,7 +225,9 @@ export BEAMPILOT_CAM_WINDOW="beamng"
 # covers all three.
 #
 # Only ever runs stopped and with openpilot not driving, and aborts the instant
-# either stops being true. Not requested at all once the ratio is known.
+# either stops being true. beamngd first receives the stable vehicle+lock cache
+# key, then explicitly authorizes only an uncached rack; startup packets cannot
+# move the wheel, and it is not requested at all once the ratio is known.
 # export BEAMPILOT_STEER_CALIBRATE="0"             # 0 = never sweep; measure while driving
 # export BEAMPILOT_STEER_CALIBRATE_SECONDS="2.5"
 # export BEAMPILOT_STEER_CALIBRATE_AMPLITUDE="0.55"  # fraction of lock; short of the stops
