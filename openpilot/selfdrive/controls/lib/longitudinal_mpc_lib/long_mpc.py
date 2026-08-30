@@ -8,7 +8,7 @@ from openpilot.cereal import log
 # min(mpc_target, cruise_target) that bound won whenever it was the lower of
 # the two -- so BEAMPILOT_ACCEL_SCALE raised the planner's clip while the
 # thing producing the number stayed where it was.
-from openpilot.common.beampilot_limits import ACCEL_MAX, ACCEL_MIN
+from openpilot.common.beampilot_limits import ACCEL_MAX, ACCEL_MIN, T_FOLLOW_SCALE
 from openpilot.common.realtime import DT_MDL
 from openpilot.common.swaglog import cloudlog
 # WARNING: imports outside of constants will not trigger a rebuild
@@ -313,7 +313,7 @@ class LongitudinalMpc:
     return lead_xv
 
   def update(self, radarstate, personality=log.LongitudinalPersonality.standard):
-    t_follow = get_T_FOLLOW(personality)
+    t_follow = get_T_FOLLOW(personality) * T_FOLLOW_SCALE
 
     lead_xv_0 = self.process_lead(radarstate.leadOne)
     lead_xv_1 = self.process_lead(radarstate.leadTwo)

@@ -377,6 +377,7 @@ the reason it won't take a corner.
 | `BEAMPILOT_CURVE_SLOWDOWN` | `0` | **Experimental.** Brake for a corner *before* reaching it. See [below](#slowing-down-for-corners-experimental-off-by-default). |
 | `BEAMPILOT_CURVE_LAT_ACCEL` | `0.7 ×` lateral limit | The cornering force to aim for, which sets the speed it slows to. |
 | `BEAMPILOT_PERSONALITY` | `1` | Follow distance: `0` aggressive (1.25 s), `1` standard (1.45 s), `2` relaxed (1.75 s). |
+| `BEAMPILOT_T_FOLLOW_SCALE` | `1.0` | Multiplier on top of the follow-distance time gap above. Lower shrinks it further and delays the braking point; braking distance still grows with the square of speed regardless. |
 
 > [!IMPORTANT]
 > **Three ceilings, not one.** Until recently the two above were the only ones that moved, which
@@ -670,6 +671,7 @@ Too low makes openpilot oversteer, too high makes it run wide.
 | `BEAMPILOT_WIDE_CAMERA_PLACEMENT` | `vehicle_front` | In `wide_crop`, derive a per-car anchor from its oriented bounds; `legacy` keeps fixed offsets. |
 | `BEAMPILOT_WIDE_CAMERA_HEIGHT_M` | `1.22` | Adaptive wide-lens height above the vehicle bounds' bottom. |
 | `BEAMPILOT_WIDE_CAMERA_CLEARANCE_M` | `0.15` | Adaptive wide-lens distance ahead of the vehicle bounds' front. |
+| `BEAMPILOT_CAMERA_COMMAND_PORT` | `49157` | BeamNG camera tuner → `beamngd`, loopback. Used for one-shot extrinsics resets. |
 | `BEAMPILOT_CAM_ASPECT` | `crop` | `crop` or `stretch`. See [Aspect ratio](#aspect-ratio). |
 | `BEAMPILOT_CAM_WINDOW` | `beamng` | Track the game window by name/class. See [Camera capture](#camera-capture). |
 | `BEAMPILOT_CAM_MONITOR` | `1` | Whole-monitor fallback. |
@@ -867,21 +869,41 @@ thing to check.
 | What | Where | Symptom if wrong |
 |---|---|---|
 | Steering lock and ratio | measured by the mod; `BEAMPILOT_STEER_LOCK_DEG` / `BEAMPILOT_STEER_RATIO` to pin | Oversteers (too low) or runs wide (too high) |
-| Wide camera height | `BEAMPILOT_WIDE_CAMERA_HEIGHT_M` | Misjudges distance — the model assumes ~1.22 m |
-| Wide camera fore/aft | `BEAMPILOT_WIDE_CAMERA_CLEARANCE_M` | Bodywork at the extreme edge on unusual mod vehicles |
-| Narrow camera height / fore-aft | `offUp` / `offFwd` in `openpilot_cam` | Too much or too little hood in the legacy narrow view |
-| Lateral offset | `offRight` | Tracks consistently to one side of the lane |
+| Wide camera height | in-game camera tuner / `BEAMPILOT_WIDE_CAMERA_HEIGHT_M` global default | Misjudges distance — the model assumes ~1.22 m |
+| Wide camera fore/aft | in-game camera tuner / `BEAMPILOT_WIDE_CAMERA_CLEARANCE_M` global default | Bodywork at the extreme edge on unusual mod vehicles |
+| Narrow camera height / fore-aft | in-game camera tuner | Too much or too little hood in the legacy narrow view |
+| Lateral offset | in-game camera tuner | Tracks consistently to one side of the lane |
 
-The camera mod lives at
-`tools/beamng_mod/openpilot_cam/lua/ge/extensions/core/cameraModes/openpilot.lua`. Edits apply
-live — reload with <kbd>Ctrl</kbd>+<kbd>L</kbd> in game.
+Open BeamNG's pause menu, choose **Mods → Beampilot Camera**, and press **Activate camera**. The
+sliders update the view live. **Save for this vehicle** stores a sparse profile under the
+vehicle's JBeam model key, so every configuration of that model shares the alignment. Profiles
+are written to `settings/beampilot/camera.json` in the BeamNG user folder.
+
+Saved in-game values deliberately have higher priority than the matching TUI/environment pose
+defaults. The bridge can continue refreshing its camera configuration without knocking a tuned
+car off-centre. Only the sliders actually changed for that vehicle are overridden: FOV,
+narrow/wide placement mode, and every untouched pose value continue to follow beampilot's global
+configuration. Choose **Use TUI/default pose**, then save, to delete that vehicle's overrides.
+
+After changing **Pitch** or **Yaw**, use **Reset openpilot calibration** in the same panel while
+openpilot is disengaged. The button asks for confirmation, clears only `CalibrationParams`, and
+briefly cycles the onroad processes so `calibrationd` starts fresh; it does not erase steering
+ratio, torque, or vehicle-dynamics learning. Drive straight above 15 mph afterward until openpilot
+reports that calibration is complete. A learned result is preserved on later launches; the
+`instant` mode's level-pose seed is now used only when no calibration exists yet.
+
+The source camera defaults still live at
+`tools/beamng_mod/openpilot_cam/lua/ge/extensions/core/cameraModes/openpilot.lua`; change those only
+when setting a new global fallback rather than aligning one car. Mod edits apply live after
+<kbd>Ctrl</kbd>+<kbd>L</kbd> in game.
 
 > [!NOTE]
 > In `wide_crop`, the default `vehicle_front` placement measures the current vehicle's undeformed
 > oriented bounds once and puts the lens ahead of the complete body at the model's expected camera
 > height. This avoids cabin/bonnet clipping across different reference-node layouts. Narrow mode
 > deliberately retains the existing tuned pose; use `offUp`/`offFwd` in the camera mod if a
-> particular car needs narrow-only tuning.
+> particular car needs narrow-only tuning. The in-game tuner automatically shows the controls
+> that affect the active placement mode.
 
 The narrow camera can also sit noticeably **off-centre** on some cars. Its legacy pose is relative
 to `veh:getPosition()`, which returns the vehicle's JBeam reference node, and that node is not
@@ -891,8 +913,8 @@ whole bounding box; `offRight` remains an explicit lateral trim.
 It drives surprisingly well anyway. Lane positioning is learned from the whole scene rather than
 from the camera sitting at one exact spot, so a lateral offset mostly shifts where the car sits in
 the lane rather than breaking it outright. Worth knowing before you spend an evening chasing it:
-it's a real imperfection, but usually not the one causing your problem. `offRight` in the camera
-mod corrects it if a particular car tracks consistently to one side.
+it's a real imperfection, but usually not the one causing your problem. The tuner's **Lateral
+offset** corrects it if a particular car tracks consistently to one side.
 
 Each vehicle also has its own steering lock and its own rack ratio — but you no longer set those
 by hand when you switch cars. The mod measures both off the vehicle BeamNG spawned; see
@@ -1134,6 +1156,7 @@ flowchart TB
     BNG -->|"<b>UDP 49154</b><br/>blind spot → carState"| CARD
     LUA ==>|"<b>UDP 49155</b><br/>radar points → radarTracks"| CARD
     LUA ==>|"<b>UDP 49156</b><br/>wheelbase · mass · COG · yaw inertia<br/>steering lock · rack ratio"| BNG
+    GAME ==>|"<b>UDP 49157</b><br/>one-shot camera calibration reset"| BNG
     CARD -->|"carState"| MODELD
     CTRL ==>|"<b>controlsState</b><br/>desiredCurvature (1/m)"| BNG
     BNG ==>|"<b>UDP 49153</b> JSON<br/>steering −1‥1 · throttle · brake"| LUA
@@ -1445,7 +1468,7 @@ never runs there, since that driver is disabled.
 | Steers but runs wide on corners | Steering lock wrong, or limits binding | Set `BEAMPILOT_STEER_LOCK_DEG`; check the BINDING line |
 | Weaving / oscillation | `BEAMPILOT_MAX_LAT_JERK` too high | Lower it toward 5.0 first |
 | Doesn't accelerate | `openpilotLongitudinalControl` false | Confirm `AlphaLongitudinalEnabled` was set at launch |
-| Brakes too early for traffic | Follow distance | `BEAMPILOT_PERSONALITY=0` |
+| Brakes too early for traffic | Follow distance | `BEAMPILOT_PERSONALITY=0`; still early, also lower `BEAMPILOT_T_FOLLOW_SCALE` |
 | Lane change arms but never commits | Needs the steering nudge | `BEAMPILOT_AUTO_LANE_CHANGE=1` |
 | Bursts of `observation too old` | `modeld` behind, GPU contention | Lower BeamNG's graphics settings |
 | `Address already in use` on 49152 | A previous `beamngd` still running | `pkill -f beamngd.py` |

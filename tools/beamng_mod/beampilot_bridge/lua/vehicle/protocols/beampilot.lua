@@ -137,6 +137,7 @@ local CAMERA_DEFAULTS = {
   autoPlace = 0,   -- wide mode can anchor outside this vehicle's front OOBB
   height = 1.22,   -- metres above the vehicle OOBB bottom
   clearance = 0.15,-- metres ahead of the vehicle OOBB front
+  commandPort = 49157, -- GE camera tuner -> beamngd calibration commands
 }
 local lastCameraConfig = nil
 
@@ -145,6 +146,7 @@ local function applyCameraConfig(newCfg)
   local autoPlace = CAMERA_DEFAULTS.autoPlace
   local height = CAMERA_DEFAULTS.height
   local clearance = CAMERA_DEFAULTS.clearance
+  local commandPort = CAMERA_DEFAULTS.commandPort
   if type(newCfg) == "table" and type(newCfg.fov) == "number" then
     fov = math.max(1, math.min(170, newCfg.fov))
   end
@@ -157,14 +159,17 @@ local function applyCameraConfig(newCfg)
   if type(newCfg) == "table" and type(newCfg.clearance) == "number" then
     clearance = math.max(0.02, math.min(2, newCfg.clearance))
   end
+  if type(newCfg) == "table" and type(newCfg.commandPort) == "number" then
+    commandPort = math.floor(math.max(1024, math.min(65535, newCfg.commandPort)))
+  end
   -- OPENPILOT_CAM is created by the GE-side camera mod. Config is re-sent
   -- every two seconds, so arriving before that camera has initialized is safe.
   obj:queueGameEngineLua(string.format(
     "if type(OPENPILOT_CAM) == 'table' then OPENPILOT_CAM.fov = %.8f; "
       .. "OPENPILOT_CAM.autoPlace = %d; OPENPILOT_CAM.wideHeight = %.4f; "
-      .. "OPENPILOT_CAM.wideClearance = %.4f end; "
+      .. "OPENPILOT_CAM.wideClearance = %.4f; OPENPILOT_CAM.commandPort = %d end; "
       .. "if core_camera and core_camera.setFOV then core_camera.setFOV(0, %.8f) end",
-    fov, autoPlace, height, clearance, fov))
+    fov, autoPlace, height, clearance, commandPort, fov))
   local configKey = string.format("%.3f|%d|%.3f|%.3f", fov, autoPlace, height, clearance)
   if configKey ~= lastCameraConfig then
     local placement = autoPlace ~= 0 and "vehicle-front adaptive" or "legacy fixed offsets"

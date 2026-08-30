@@ -33,8 +33,8 @@ export SKIP_FW_QUERY="1"
 # LATERAL (turning). The binding one is lateral accel: max curvature is
 # MAX_LAT_ACCEL / v^2, so stock 3.0 allows only a ~300m radius at 67mph.
 #   3.0 = stock/comfort   5.0 = spirited   8.0+ = approaching real tire grip
-export BEAMPILOT_MAX_LAT_ACCEL="40.0"    # m/s^2
-export BEAMPILOT_MAX_LAT_JERK="8.0"    # m/s^3, how fast it may change curvature
+export BEAMPILOT_MAX_LAT_ACCEL="65.0"    # m/s^2
+export BEAMPILOT_MAX_LAT_JERK="20.0"    # m/s^3, how fast it may change curvature
 # export BEAMPILOT_MAX_CURVATURE="0.2"  # 1/m, geometric cap; only binds below ~11mph
 #
 # Raising the two above is not the whole story, and the parts that were missing
@@ -89,6 +89,12 @@ export BEAMPILOT_CURVE_SLOWDOWN="0"
 # LONGITUDINAL (accel/braking), as a multiplier on the stock envelope.
 export BEAMPILOT_ACCEL_SCALE="2.0"    # 1.0 = stock (1.6 m/s^2 from a stop)
 export BEAMPILOT_DECEL_SCALE="1.5"    # 1.0 = stock (-1.2 m/s^2 cruise braking)
+
+# Follow gap, on top of BEAMPILOT_PERSONALITY above. 1.0 = stock aggressive
+# (1.25s gap); lower shrinks it further and delays the braking point. Braking
+# distance still grows with the square of speed (COMFORT_BRAKE, unscaled), so
+# this mainly affects when it starts slowing, not the last few metres of it.
+export BEAMPILOT_T_FOLLOW_SCALE="0.7"
 # ---------------------------------------------------------------------------
 
 # When camera calibration happens.
@@ -124,6 +130,8 @@ export BEAMPILOT_CAMERA_MODE="narrow"
 export BEAMPILOT_WIDE_CAMERA_PLACEMENT="vehicle_front"
 export BEAMPILOT_WIDE_CAMERA_HEIGHT_M="1.22"    # height above OOBB bottom
 export BEAMPILOT_WIDE_CAMERA_CLEARANCE_M="0.15"    # distance ahead of OOBB front
+# BeamNG pause-menu camera tuner -> beamngd one-shot commands (loopback UDP).
+export BEAMPILOT_CAMERA_COMMAND_PORT="49157"
 
 # Camera capture. Priority: CAM_REGION > CAM_WINDOW > CAM_MONITOR.
 # CAM_WINDOW tracks the BeamNG window by name/class and follows it as it moves
@@ -697,3 +705,6 @@ export BEAMPILOT_LAUNCH_DELAY="0"
 
 # --- added by tools/beampilot_tui.py ---
 export BEAMPILOT_GPU_INDEX="2"
+
+# --- added by tools/beampilot_tui.py ---
+export BEAMPILOT_LANE_CHANGE_ABORT_S="4.0"

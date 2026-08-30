@@ -10,6 +10,20 @@
 -- FOV is whatever it was set to, every frame, unconditionally.
 
 local vecZ = vec3(0, 0, 1)
+local cameraTuner = nil
+
+local function effectiveConfig(veh, baseCfg)
+  -- Load through BeamNG's extension manager so this camera and the Vue/Lua
+  -- bridge share one module instance (and therefore one live working profile).
+  cameraTuner = cameraTuner or rawget(_G, "beampilotCameraTuner")
+  if not cameraTuner and extensions and type(extensions.load) == "function" then
+    cameraTuner = extensions.load("beampilotCameraTuner")
+  end
+  if cameraTuner and type(cameraTuner.getEffectiveConfig) == "function" then
+    return cameraTuner.getEffectiveConfig(veh, baseCfg)
+  end
+  return baseCfg
+end
 
 local C = {}
 C.__index = C
@@ -31,6 +45,7 @@ local defaultCfg = {
   autoPlace = 0,   -- wide mode: use this vehicle's OOBB instead of fixed offsets
   wideHeight = 1.22,    -- metres above the bottom of the vehicle OOBB
   wideClearance = 0.15, -- metres ahead of the front of the vehicle OOBB
+  commandPort = 49157, -- GE camera tuner -> beamngd calibration commands
   measuredHeight = -1, -- metres above the road, filled in by the ray below
 }
 
@@ -151,8 +166,9 @@ local function measureHeight(pos)
 end
 
 function C:update(data)
-  local cfg = self:cfg()
+  local baseCfg = self:cfg()
   local veh = data.veh or (be and be:getPlayerVehicle(0))
+  local cfg = effectiveConfig(veh, baseCfg)
 
   if not veh then
     -- No vehicle: hold the last pose rather than snapping to the origin.
@@ -212,7 +228,7 @@ function C:update(data)
   if rayTick >= 15 then
     rayTick = 0
     local h = measureHeight(camPos)
-    if h then cfg.measuredHeight = h end
+    if h then baseCfg.measuredHeight = h end
   end
 end
 

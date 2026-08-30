@@ -37,6 +37,14 @@ DECEL_SCALE = env_float("BEAMPILOT_DECEL_SCALE", 1.0)
 ACCEL_MAX = STOCK_ACCEL_MAX * ACCEL_SCALE
 ACCEL_MIN = STOCK_ACCEL_MIN * DECEL_SCALE
 
+# get_safe_obstacle_distance() in long_mpc.py is v^2/(2*COMFORT_BRAKE) +
+# t_follow*v + STOP_DISTANCE -- the t_follow*v term is what makes the braking
+# point move further out as speed rises, and it stacks with LongitudinalPersonality
+# (get_T_FOLLOW: aggressive 1.25s, standard 1.45s, relaxed 1.75s). Once
+# personality is already at aggressive, this scales the gap further; 1.0 is
+# stock aggressive, so an unset environment changes nothing beyond personality.
+T_FOLLOW_SCALE = env_float("BEAMPILOT_T_FOLLOW_SCALE", 1.0)
+
 # --- lateral --------------------------------------------------------------
 # The binding one on whether a corner can be taken at all: clip_curvature caps
 # curvature at MAX_LATERAL_ACCEL / v^2, so stock 3.0 allows only a ~300m radius

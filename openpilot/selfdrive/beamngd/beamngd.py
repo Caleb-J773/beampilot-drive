@@ -16,6 +16,7 @@ from opendbc.car.honda.values import CruiseButtons
 from openpilot.common.beampilot_limits import ACCEL_MAX as ACCEL_MAX_SCALED
 from openpilot.common.beampilot_limits import ACCEL_MIN as ACCEL_MIN_SCALED
 from openpilot.common.beampilot_env import env_bool, env_float, env_int, env_str
+from openpilot.common.beampilot_camera import CAMERA_COMMAND_PORT
 from openpilot.common.beampilot_camera import lua_config as camera_lua_config
 from openpilot.common.beampilot_bsm import (BSM_ENABLED, BlindSpotSender,
                                             flags_from_dash_lights, resolve)
@@ -38,10 +39,12 @@ from openpilot.tools.sim.lib.simulated_sensors import SimulatedSensors
 from openpilot.selfdrive.beamngd.virtual_joystick import BeamNGVirtualJoystick
 
 # Talks to the beampilot_bridge BeamNG.drive mod (tools/beamng_mod/beampilot_bridge)
-# over two plain UDP sockets:
+# over plain UDP sockets:
 #   TELEMETRY_PORT: the mod sends real vehicle telemetry here, ~100Hz.
 #   CONTROL_PORT:   we send openpilot's desired steering/throttle/brake here; the
 #                   mod applies it via BeamNG's input.event() when engaged.
+#   CAMERA_COMMAND_PORT: the in-game tuner sends a confirmed one-shot request
+#                        to reset camera/extrinsics calibration here.
 # CAN/IMU/GPS/driver-monitoring publishing is delegated to the same generic
 # SimulatorState/SimulatedCar/SimulatedSensors pipeline the MetaDrive bridge
 # (openpilot/tools/sim/bridge/metadrive) already uses, instead of hand-rolling it.
@@ -53,6 +56,9 @@ CONTROL_PORT = env_int("BEAMPILOT_CONTROL_PORT", 49153)
 # change TELEMETRY_PORT/CONTROL_PORT in
 # tools/beamng_mod/beampilot_bridge/lua/vehicle/protocols/beampilot.lua too --
 # vehicle Lua has no access to this process's environment.
+
+CAMERA_COMMAND_MAGIC = "BPC1"
+CAMERA_RESET_COMMAND = "resetCalibration"
 
 # "lua" (default): send steering/throttle/brake to the beampilot_bridge mod's
 # control socket, applied via input.event() straight into vehicle Lua -- no
@@ -309,6 +315,32 @@ def parse_telemetry(data: bytes) -> Telemetry | None:
   )
 
 
+def handle_camera_command(data: bytes, params: Params, engaged: bool) -> dict[str, bool | str]:
+  """Validate a loopback command from the BeamNG pause-menu camera tuner."""
+  try:
+    request = json.loads(data)
+  except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
+    return {"ok": False, "error": "Invalid camera calibration request"}
+
+  if not isinstance(request, dict) or request.get("magic") != CAMERA_COMMAND_MAGIC:
+    return {"ok": False, "error": "Invalid camera calibration request"}
+  if request.get("command") != CAMERA_RESET_COMMAND:
+    return {"ok": False, "error": "Unknown camera calibration command"}
+  if engaged:
+    return {"ok": False, "error": "Disengage openpilot before resetting calibration"}
+
+  # This is deliberately narrower than openpilot's device-settings reset,
+  # which also erases learned steering dynamics. Moving the simulated camera
+  # only invalidates its extrinsics. Cycling onroad restarts calibrationd so it
+  # reads the now-empty key instead of immediately writing its old state back.
+  params.remove("CalibrationParams")
+  params.put_bool("OnroadCycleRequested", True, block=True)
+  return {
+    "ok": True,
+    "message": "Camera calibration reset; drive straight above 15 mph to recalibrate",
+  }
+
+
 def find_keyboard_devices() -> list[evdev.InputDevice]:
   """Physical keyboards only, matched by capability (KEY_I/O/U), not by name.
   Reading here is passive (no .grab()) so BeamNG's own keyboard input is unaffected.
@@ -355,6 +387,19 @@ class BeamNGBridge:
     self.telemetry_sock.bind((BEAMNG_ADDRESS, TELEMETRY_PORT))
 
     self.control_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    self.camera_command_sock: socket.socket | None = None
+    try:
+      self.camera_command_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+      self.camera_command_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+      self.camera_command_sock.setblocking(False)
+      self.camera_command_sock.bind((BEAMNG_ADDRESS, CAMERA_COMMAND_PORT))
+    except OSError as error:
+      if self.camera_command_sock is not None:
+        self.camera_command_sock.close()
+      self.camera_command_sock = None
+      print("[beamngd] camera calibration command socket unavailable on"
+            + f" {BEAMNG_ADDRESS}:{CAMERA_COMMAND_PORT}: {error}", flush=True)
 
     self.joystick = BeamNGVirtualJoystick() if CONTROL_MODE == "joystick" else None
     if self.joystick is not None:
@@ -498,6 +543,25 @@ class BeamNGBridge:
     if latest is None:
       return None
     return parse_telemetry(latest)
+
+  def poll_camera_commands(self) -> None:
+    if self.camera_command_sock is None:
+      return
+    while True:
+      try:
+        data, source = self.camera_command_sock.recvfrom(2048)
+      except BlockingIOError:
+        break
+      except OSError:
+        return
+      engaged = bool(self.sm['selfdriveState'].active)
+      response = handle_camera_command(data, self.params, engaged)
+      try:
+        self.camera_command_sock.sendto(json.dumps(response).encode(), source)
+      except OSError:
+        pass
+      if response.get("ok"):
+        print("[beamngd] camera/extrinsics calibration reset from BeamNG UI", flush=True)
 
   def update_state_from_telemetry(self, telemetry: Telemetry):
     self.state.valid = True
@@ -965,6 +1029,7 @@ class BeamNGBridge:
 
   def tick(self):
     self.sm.update(0)
+    self.poll_camera_commands()
 
     if self.geometry is not None and self.geometry.update():
       self.apply_geometry()

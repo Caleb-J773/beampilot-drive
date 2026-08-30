@@ -7,7 +7,7 @@ published as the wide stream, and a centered crop supplies the narrow stream.
 """
 import math
 
-from openpilot.common.beampilot_env import env_float, env_str
+from openpilot.common.beampilot_env import env_float, env_int, env_str
 
 FRAME_WIDTH = 1928
 FRAME_HEIGHT = 1208
@@ -47,6 +47,7 @@ WIDE_CAMERA_PLACEMENT = (_raw_wide_placement if _raw_wide_placement in WIDE_CAME
 # and the small forward clearance leaves the complete vehicle behind the lens.
 WIDE_CAMERA_HEIGHT_M = min(5.0, max(0.2, env_float("BEAMPILOT_WIDE_CAMERA_HEIGHT_M", 1.22)))
 WIDE_CAMERA_CLEARANCE_M = min(2.0, max(0.02, env_float("BEAMPILOT_WIDE_CAMERA_CLEARANCE_M", 0.15)))
+CAMERA_COMMAND_PORT = min(65535, max(1024, env_int("BEAMPILOT_CAMERA_COMMAND_PORT", 49157)))
 
 
 def lua_config() -> dict[str, float]:
@@ -57,6 +58,7 @@ def lua_config() -> dict[str, float]:
     "autoPlace": float(auto_place),
     "height": WIDE_CAMERA_HEIGHT_M,
     "clearance": WIDE_CAMERA_CLEARANCE_M,
+    "commandPort": float(CAMERA_COMMAND_PORT),
   }
 
 

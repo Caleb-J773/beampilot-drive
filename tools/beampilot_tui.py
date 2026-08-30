@@ -284,6 +284,11 @@ def build_sections() -> list[Section]:
               "Select the desired time gap: aggressive 1.25 s, standard 1.45 s, or relaxed 1.75 s.",
               "0", choices=["0", "1", "2"],
               value_labels={"0": "aggressive", "1": "standard", "2": "relaxed"}),
+      Setting("BEAMPILOT_T_FOLLOW_SCALE", "Follow gap scale",
+              "Multiplier on top of the following-distance time gap above. Stock is 1.0; lower"
+              + " shrinks the gap further and delays the braking point. Braking distance still grows"
+              + " with the square of speed regardless of this setting.",
+              "1.0", numeric=True, step=0.1),
       Setting("BEAMPILOT_STEER_SWEEP_SECONDS", "Steering response (s)",
               "Time used to rate-limit a full steering sweep. Lower values respond faster and may"
               + " reduce stability.",
@@ -429,6 +434,10 @@ def build_sections() -> list[Section]:
               "Distance between the lens and the front of the vehicle bounding box. Increase this"
               + " if bodywork remains visible in the wide image.",
               "0.15", numeric=True, step=0.05),
+      Setting("BEAMPILOT_CAMERA_COMMAND_PORT", "Camera command port",
+              "Loopback UDP port used by the BeamNG camera tuner to ask beamngd to reset"
+              + " openpilot's camera/extrinsics calibration.",
+              "49157", numeric=True, step=1.0),
       Setting("BEAMPILOT_CAPTURE_BACKEND", "Capture backend",
               "auto selects X11 capture on X11 and portal/PipeWire capture on Wayland. portal"
               + " requires a screen-sharing selection and GStreamer. x11 forces direct X11 capture"

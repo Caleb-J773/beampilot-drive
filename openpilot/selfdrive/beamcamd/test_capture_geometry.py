@@ -189,7 +189,8 @@ class TestBeamNGCameraConfig(unittest.TestCase):
     camera.WIDE_CAMERA_CLEARANCE_M = 0.2
     cfg = camera.lua_config()
     self.assertEqual(cfg, {"fov": WIDE_VERTICAL_FOV, "autoPlace": 1.0,
-                           "height": 1.3, "clearance": 0.2})
+                           "height": 1.3, "clearance": 0.2,
+                           "commandPort": float(camera.CAMERA_COMMAND_PORT)})
 
   def test_legacy_option_disables_adaptive_anchor(self):
     camera.WIDE_CROP_ENABLED = True

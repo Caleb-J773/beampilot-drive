@@ -90,6 +90,7 @@ Targeted tests worth knowing by name — run these after touching the matching c
 | `openpilot/selfdrive/controls/lib/test_desire_helper_bsm.py` | Lane-change state machine: refusing to start, cancelling in flight |
 | `openpilot/selfdrive/beamngd/test_radar.py` | Radar wire format + receiver, cross-checked against the real Lua encoder |
 | `openpilot/selfdrive/beamngd/test_carstate_signals.py` | Gear / parking brake / steering rate round-tripped through the Honda DBC |
+| `openpilot/selfdrive/beamngd/test_camera_calibration.py` | In-game request validation, disengaged gate, and extrinsics-only reset |
 | `openpilot/selfdrive/controls/test_radard_beampilot.py` | Radar-only lead selection, including the in-lane test on a bend |
 | `tools/test_beampilot_tui.py` | TUI defaults match the code's actual `env_bool`/`env_float` defaults |
 
@@ -121,6 +122,7 @@ simulates has BSM messages in its DBC.
 | `selfdrive/controls/lib/desire_helper.py` | `BEAMPILOT_AUTO_LANE_CHANGE` — commit on the blinker alone; `BEAMPILOT_LANE_CHANGE_ABORT` — cancel one in flight on a blind spot |
 | `selfdrive/controls/lib/drive_helpers.py` | `BEAMPILOT_MAX_LAT_ACCEL` / `_JERK` / `MAX_CURVATURE` |
 | `selfdrive/controls/lib/longitudinal_planner.py` | `BEAMPILOT_ACCEL_SCALE` / `_DECEL_SCALE` |
+| `selfdrive/controls/lib/longitudinal_mpc_lib/long_mpc.py` | `BEAMPILOT_T_FOLLOW_SCALE` — multiplier on `get_T_FOLLOW()`'s time gap, on top of `BEAMPILOT_PERSONALITY` |
 | `selfdrive/selfdrived/selfdrived.py` | `BEAMPILOT_IGNORE_COMM_ISSUE`; also the "Lane Change Cancelled" alert, added straight to the `AlertManager` |
 | `selfdrive/car/card.py` | `BEAMPILOT_BSM` — overlay blind spot onto `carState`; `BEAMPILOT_RADAR` — fill in the empty `RadarData` (see gotchas) |
 | `tools/opendbc_beampilot_car/` | our own opendbc platform, `BEAMPILOT` — the car openpilot is actually driving |
@@ -137,7 +139,9 @@ BeamNG.drive
   │  UDP 49153  control in     ◄───────┐ │   (+ BSM/radar/geometry/camera tuning, every 2s)
   │  UDP 49155  radar points ──────────┼─┼──► card ──► radarTracks
   │  UDP 49156  vehicle geometry ──────┤ │   (wheelbase, mass, COG, yaw inertia,
-  ▼                                    │ │    steering lock, measured rack ratio)
+  │                                    │ │    steering lock, measured rack ratio)
+  │  UDP 49157  calibration command ───┤ │   (in-game camera tuner → beamngd)
+  ▼                                    │ │
 screen  ──► beamcamd.py ──► VisionIPC ─┼─┼──► modeld ──► modelV2
                                        │ │                  │
             beamngd.py ────────────────┘ │             plannerd/controlsd
@@ -177,6 +181,7 @@ CAN only flows **into** openpilot (fake sensors), never back into the game.
 | `openpilot/selfdrive/beamcamd/portal_capture.py` | Wayland capture: xdg-desktop-portal ScreenCast + PipeWire |
 | `tools/beamng_mod/beampilot_bridge/lua/vehicle/protocols/beampilot.lua` | the BeamNG mod: telemetry out, control in |
 | `tools/beamng_mod/openpilot_cam/lua/ge/.../openpilot.lua` | rigid, runtime FOV-matched camera (25.70° narrow / 93.62° wide). **Required** — `beampilot.lua` selects it by name at spawn |
+| `tools/beamng_mod/openpilot_cam/lua/ge/extensions/beampilotCameraTuner.lua` | sparse per-JBeam pose overrides + pause-menu bridge; saved vehicle values layer above TUI defaults |
 | `openpilot/selfdrive/controls/lib/beampilot_curve.py` | brake for a corner before reaching it, from the model's own predicted curvature |
 | `openpilot/common/beampilot_limits.py` | how hard the car may be driven: accel/lateral limits, the combined envelope, and the excessive-actuation trip points, all scaling together |
 | `openpilot/common/beampilot_bsm.py` | BSM wire format + the `beamngd`→`card` socket, and the tuning pushed down to the mod |
@@ -240,7 +245,8 @@ first.
 ### Startup, timing, control loop
 
 - **`set_params_enabled()` must run before the stack starts** (`launch_beampilot.sh`). It seeds
-  `CalibrationParams` (validBlocks=20, rpy=[0,0,0]). Without it `calibrationd` needs *minutes* of
+  `CalibrationParams` (validBlocks=20, rpy=[0,0,0]) only when no learned value exists. Without it
+  `calibrationd` needs *minutes* of
   sustained 15+mph straight driving to converge, and until then the model's road-frame transform
   is wrong — which manifests as biased/drifting steering, not as an obvious error.
 - **`SimulatedSensors` helpers emit multi-sample bursts** (5x IMU, 10x GPS) sized for a ~20Hz
@@ -394,6 +400,11 @@ first.
   took `plannerd` down once.
 
 ### UI / rendering
+
+- **Per-vehicle camera pose wins over the TUI base, field by field.** The bridge deliberately
+  refreshes `OPENPILOT_CAM` every two seconds; the camera tuner must keep sparse JBeam-keyed
+  profiles separate and overlay them at render time. Never write a saved pose back into that base
+  table or the next refresh will erase it. FOV and placement mode stay bridge-owned.
 
 - **The UI is Python + raylib** (`pyray`), not Qt. `augmented_road_view.py` has an explicit "custom
   UI extension point"; a widget subclasses `Widget` and gets `_update_state()` called from

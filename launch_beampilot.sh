@@ -13,8 +13,9 @@ python3 "$DIR/tools/install_beampilot_car.py" --quiet || {
   export FINGERPRINT="HONDA_CIVIC_2022"
 }
 
-# Seeds CalibrationParams (validBlocks=20, rpyCalib=[0,0,0]) so calibrationd
-# starts "calibrated" instead of requiring minutes of sustained 15+mph
+# Seeds CalibrationParams (validBlocks=20, rpyCalib=[0,0,0]) only when there
+# is no learned calibration yet, so calibrationd starts "calibrated" instead
+# of requiring minutes of sustained 15+mph
 # straight-line driving to converge on its own (see calibrationd.py's
 # MIN_SPEED_FILTER/INPUTS_NEEDED gating) -- reasonable here since
 # openpilot_cam is a rigidly-mounted, always-level virtual camera, not a
@@ -22,12 +23,13 @@ python3 "$DIR/tools/install_beampilot_car.py" --quiet || {
 # HasAcceptedTerms/OpenpilotEnabledToggle so onboarding doesn't block
 # engagement. This mutates only the one-off python subprocess's own
 # environment, not this shell's -- FINGERPRINT stays whatever
-# config_beampilot.sh already exported.
-python3 -c "from openpilot.selfdrive.test.helpers import set_params_enabled; set_params_enabled()"
+# config_beampilot.sh already exported. Preserving an existing value is what
+# makes an in-game reset followed by live convergence survive the next launch.
+python3 -c "from openpilot.common.params import Params; from openpilot.selfdrive.test.helpers import set_params_enabled; p=Params(); saved=p.get('CalibrationParams'); set_params_enabled(); p.put('CalibrationParams', saved, block=True) if saved else None"
 
 # BEAMPILOT_CALIBRATION controls what the above did to CalibrationParams.
-#   instant (default) -- keep the seed: calibrationd starts "calibrated" with a
-#                        level zero pose, usable from the first second.
+#   instant (default) -- keep a learned calibration, or the level zero seed on
+#                        the first launch, usable from the first second.
 #   live              -- clear it: calibrationd converges from real driving, and
 #                        openpilot will NOT engage until it has (minutes of
 #                        sustained straight driving above 15mph -- see

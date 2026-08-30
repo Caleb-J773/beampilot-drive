@@ -37,6 +37,8 @@ MOD_FEATURES = {
   "openpilot_cam": {
     "runtime narrow/wide lens control":
       ("lua/ge/extensions/core/cameraModes/openpilot.lua", "93.619537"),
+    "in-game per-vehicle camera tuner":
+      ("ui/ui-vue/mods/beampilot_camera/index.js", "beampilot-camera-tuner"),
   },
 }
 
