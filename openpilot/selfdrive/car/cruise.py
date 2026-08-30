@@ -3,13 +3,20 @@ import numpy as np
 
 from opendbc.car.structs import car
 from openpilot.common.constants import CV
+# beampilot: BEAMPILOT_MAX_ENGAGE_SPEED_SCALE raises this in step with
+# car_events.py's speedTooHigh ceiling (see beampilot_limits.py) -- otherwise
+# engaging above 145 kph would immediately clip the set speed back down to it
+# and demand a slowdown right at engagement.
+from openpilot.common.beampilot_limits import V_CRUISE_MAX_KPH
 
 
 # WARNING: this value was determined based on the model's training distribution,
-#          model predictions above this speed can be unpredictable
+#          model predictions above this speed can be unpredictable. beampilot
+#          raises it for sim use anyway, at the driver's own risk -- see
+#          BEAMPILOT_MAX_ENGAGE_SPEED_SCALE.
 # V_CRUISE's are in kph
 V_CRUISE_MIN = 8
-V_CRUISE_MAX = 145
+V_CRUISE_MAX = V_CRUISE_MAX_KPH
 V_CRUISE_UNSET = 255
 V_CRUISE_INITIAL = 40
 V_CRUISE_INITIAL_EXPERIMENTAL_MODE = 105

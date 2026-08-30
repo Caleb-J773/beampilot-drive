@@ -125,6 +125,7 @@ simulates has BSM messages in its DBC.
 | `selfdrive/controls/lib/longitudinal_mpc_lib/long_mpc.py` | `BEAMPILOT_T_FOLLOW_SCALE` — multiplier on `get_T_FOLLOW()`'s time gap, on top of `BEAMPILOT_PERSONALITY` |
 | `selfdrive/selfdrived/selfdrived.py` | `BEAMPILOT_IGNORE_COMM_ISSUE`; also the "Lane Change Cancelled" alert, added straight to the `AlertManager` |
 | `selfdrive/car/card.py` | `BEAMPILOT_BSM` — overlay blind spot onto `carState`; `BEAMPILOT_RADAR` — fill in the empty `RadarData` (see gotchas) |
+| `selfdrive/car/car_events.py`, `selfdrive/car/cruise.py` | `BEAMPILOT_MAX_ENGAGE_SPEED_SCALE` — raises `MAX_CTRL_SPEED` (the `speedTooHigh` disengage ceiling) and `V_CRUISE_MAX` (max set speed) together |
 | `tools/opendbc_beampilot_car/` | our own opendbc platform, `BEAMPILOT` — the car openpilot is actually driving |
 | `tools/install_beampilot_car.py` | installs that platform into the opendbc submodule; run from setup AND launch |
 | `selfdrive/controls/radard.py` | `BEAMPILOT_RADAR_LEADS` — let a ground-truth track be the lead with no vision confirmation |

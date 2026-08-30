@@ -2,9 +2,11 @@ from openpilot.cereal import log
 from opendbc.car.structs import car
 from opendbc.car import DT_CTRL, structs
 from opendbc.car.car_helpers import interfaces
-from opendbc.car.interfaces import MAX_CTRL_SPEED
 from opendbc.car.toyota.values import ToyotaFlags
 
+# beampilot: BEAMPILOT_MAX_ENGAGE_SPEED_SCALE raises the speedTooHigh ceiling
+# below, in place of opendbc's fixed MAX_CTRL_SPEED.
+from openpilot.common.beampilot_limits import MAX_CTRL_SPEED
 from openpilot.selfdrive.selfdrived.events import Events
 
 ButtonType = structs.CarState.ButtonEvent.Type

@@ -27,6 +27,8 @@ behaves as unmodified openpilot.
 """
 from opendbc.car.interfaces import ACCEL_MAX as STOCK_ACCEL_MAX
 from opendbc.car.interfaces import ACCEL_MIN as STOCK_ACCEL_MIN
+from opendbc.car.interfaces import MAX_CTRL_SPEED as STOCK_MAX_CTRL_SPEED
+from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.lateral import ISO_LATERAL_ACCEL
 
 from openpilot.common.beampilot_env import env_float
@@ -44,6 +46,18 @@ ACCEL_MIN = STOCK_ACCEL_MIN * DECEL_SCALE
 # personality is already at aggressive, this scales the gap further; 1.0 is
 # stock aggressive, so an unset environment changes nothing beyond personality.
 T_FOLLOW_SCALE = env_float("BEAMPILOT_T_FOLLOW_SCALE", 1.0)
+
+# car_events.py raises speedTooHigh ("Slow down to engage") and disengages
+# above MAX_CTRL_SPEED -- that ceiling, not minEnableSpeed, is what actually
+# caps how fast openpilot can be engaged. V_CRUISE_MAX (selfdrive/car/cruise.py,
+# the max SET speed) has to move with it: opendbc keeps MAX_CTRL_SPEED a fixed
+# 4 kph above V_CRUISE_MAX so engaging right at the ceiling doesn't instantly
+# clip the set speed down and demand a slowdown. Reversing that same formula
+# here (instead of importing cruise.py, which would import this module back)
+# keeps both derived from the one scale.
+MAX_ENGAGE_SPEED_SCALE = env_float("BEAMPILOT_MAX_ENGAGE_SPEED_SCALE", 1.0)
+MAX_CTRL_SPEED = STOCK_MAX_CTRL_SPEED * MAX_ENGAGE_SPEED_SCALE
+V_CRUISE_MAX_KPH = MAX_CTRL_SPEED / CV.KPH_TO_MS - 4
 
 # --- lateral --------------------------------------------------------------
 # The binding one on whether a corner can be taken at all: clip_curvature caps
@@ -76,7 +90,8 @@ def summary() -> str:
           + f" (jerk {MAX_LATERAL_JERK:.1f}), accel {ACCEL_MAX:+.1f} / {ACCEL_MIN:+.1f} m/s^2,"
           + f" combined envelope x{A_TOTAL_MAX_SCALE:.2f};"
           + f" excessive-actuation trips above {EXCESSIVE_LATERAL_ACCEL:.1f} lateral,"
-          + f" {EXCESSIVE_ACCEL:+.1f} / {EXCESSIVE_DECEL:+.1f} longitudinal")
+          + f" {EXCESSIVE_ACCEL:+.1f} / {EXCESSIVE_DECEL:+.1f} longitudinal;"
+          + f" engage/set-speed ceiling {V_CRUISE_MAX_KPH:.0f} km/h")
 
 
 if __name__ == "__main__":

@@ -378,6 +378,7 @@ the reason it won't take a corner.
 | `BEAMPILOT_CURVE_LAT_ACCEL` | `0.7 ×` lateral limit | The cornering force to aim for, which sets the speed it slows to. |
 | `BEAMPILOT_PERSONALITY` | `1` | Follow distance: `0` aggressive (1.25 s), `1` standard (1.45 s), `2` relaxed (1.75 s). |
 | `BEAMPILOT_T_FOLLOW_SCALE` | `1.0` | Multiplier on top of the follow-distance time gap above. Lower shrinks it further and delays the braking point; braking distance still grows with the square of speed regardless. |
+| `BEAMPILOT_MAX_ENGAGE_SPEED_SCALE` | `1.0` | Multiplier on the max speed openpilot may be engaged/set at (stock 145 km/h / 90 mph — the model's training distribution, not a car limit). Raises `V_CRUISE_MAX` and the `speedTooHigh` ceiling together. |
 
 > [!IMPORTANT]
 > **Three ceilings, not one.** Until recently the two above were the only ones that moved, which

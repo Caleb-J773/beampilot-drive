@@ -95,6 +95,13 @@ export BEAMPILOT_DECEL_SCALE="1.5"    # 1.0 = stock (-1.2 m/s^2 cruise braking)
 # distance still grows with the square of speed (COMFORT_BRAKE, unscaled), so
 # this mainly affects when it starts slowing, not the last few metres of it.
 export BEAMPILOT_T_FOLLOW_SCALE="0.7"
+
+# Max speed openpilot may be ENGAGED/SET at. 1.0 = stock 145 km/h (90 mph);
+# above it car_events.py disengages with "Slow down to engage". The set-speed
+# ceiling (V_CRUISE_MAX) moves with it so engaging near the top doesn't
+# instantly demand a slowdown. Stock's 145 comes from the model's training
+# distribution, not a car limit -- fine to raise in a sim, at your own risk.
+export BEAMPILOT_MAX_ENGAGE_SPEED_SCALE="1.6"    # -> ~234 km/h / 145 mph
 # ---------------------------------------------------------------------------
 
 # When camera calibration happens.

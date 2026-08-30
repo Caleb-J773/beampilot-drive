@@ -289,6 +289,11 @@ def build_sections() -> list[Section]:
               + " shrinks the gap further and delays the braking point. Braking distance still grows"
               + " with the square of speed regardless of this setting.",
               "1.0", numeric=True, step=0.1),
+      Setting("BEAMPILOT_MAX_ENGAGE_SPEED_SCALE", "Max engage speed scale",
+              "Multiplier on the max speed openpilot may be engaged/set at. Stock is 1.0 (145 km/h,"
+              + " from the model's training distribution, not a car limit); the shipped configuration"
+              + " uses 1.6 (~234 km/h). Raising it is a sim-only tradeoff, at your own risk.",
+              "1.0", numeric=True, step=0.1),
       Setting("BEAMPILOT_STEER_SWEEP_SECONDS", "Steering response (s)",
               "Time used to rate-limit a full steering sweep. Lower values respond faster and may"
               + " reduce stability.",
