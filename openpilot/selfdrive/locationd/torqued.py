@@ -183,7 +183,8 @@ class TorqueEstimator(ParameterEstimator):
     # calculate lateral accel from past steering torque
     elif which == "deviceMotion":
       is_valid = msg.angularVelocityDevice.valid and msg.orientationNED.valid and msg.inputsOK and msg.sensorsOK and msg.posenetOK
-      if len(self.raw_points['steer_torque']) == self.hist_len and is_valid:
+      if (len(self.raw_points['steer_torque']) == self.hist_len and is_valid
+          and len(self.raw_points['carControl_t']) > 0 and len(self.raw_points['carState_t']) > 0):
         t = msg.timestamp * 1e-9
         device_motion = Pose.from_device_motion(msg)
         calibrated_pose = self.calibrator.build_calibrated_pose(device_motion)
