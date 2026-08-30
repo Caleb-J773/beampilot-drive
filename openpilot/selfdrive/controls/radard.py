@@ -53,6 +53,12 @@ RADAR_LEADS = env_bool("BEAMPILOT_RADAR_LEADS", False)
 # lane". Compared against the model's own path, not against straight ahead --
 # on a bend, a car in the next lane is what sits at yRel 0.
 RADAR_LEAD_HALF_WIDTH = env_float("BEAMPILOT_RADAR_LEAD_HALF_WIDTH_M", 1.8)
+# match_vision_to_track() below is stock and shared with every car this fork
+# could run on; only tighten it when the points really are ground truth (see
+# beampilot_radar.py) -- a real radar's lateral estimate has genuine noise stock
+# deliberately never gates on, and this fork's own radar is empty without
+# BEAMPILOT_RADAR anyway, so this changes nothing when it is off.
+RADAR_GROUND_TRUTH = env_bool("BEAMPILOT_RADAR", False)
 
 
 def path_lateral_at(distance: float, path_x, path_y) -> float:
@@ -176,7 +182,13 @@ def match_vision_to_track(v_ego: float, lead: capnp._DynamicStructReader, tracks
   # stationary radar points can be false positives
   dist_sane = abs(track.dRel - offset_vision_dist) < max([(offset_vision_dist)*.25, 5.0])
   vel_sane = (abs(track.vRel + v_ego - lead.v[0]) < 10) or (v_ego + track.vRel > 3)
-  if dist_sane and vel_sane:
+  # beampilot: these points are ground truth, not sensor returns, so a track
+  # that scored best on distance+speed but sits outside the lane the camera
+  # itself is reporting the lead in is not a poorly-resolved bearing -- it is
+  # a DIFFERENT car, almost always one in the next lane over at a similar
+  # speed and range. Reject it rather than hand openpilot the wrong lead.
+  lat_sane = (not RADAR_GROUND_TRUTH) or abs(track.yRel - (-lead.y[0])) < RADAR_LEAD_HALF_WIDTH
+  if dist_sane and vel_sane and lat_sane:
     return track
   else:
     return None

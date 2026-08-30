@@ -816,6 +816,11 @@ deliberately a poorer instrument than the simulator could provide:
   behind it (real radar sees under and around one). Without this it reads straight through hills.
 - **Range is 110 m**, not the ~150 m real radar reaches, and the beam is narrow.
 - **Range and range-rate are noisy.** openpilot's Kalman filter is built expecting that.
+- **A track has to sit in the camera's own believed lane to be picked as the lead**, not just win
+  on distance/speed. Stock `radard` never adds this check — a real radar's bearing has genuine
+  noise, and rejecting a drifted-but-real return would be worse than a slightly-off match — but
+  these points have no such noise, so `BEAMPILOT_RADAR` on tightens it: a same-distance,
+  same-speed car in the next lane can no longer outscore the one actually ahead of you.
 
 **About `BEAMPILOT_RADAR_LEADS`.** Stock `radard` ignores radar unless the camera already reports
 a lead. Off (the default) keeps that: ground truth only *refines* a lead the camera found — which
@@ -830,15 +835,16 @@ path rather than straight ahead, so it at least follows a bend.
 
 #### What you see
 
-A cyan diamond on the road under every track, ringed on whichever one `radard` picked as the
+A cyan dot on the road under every scanned track, ringed on whichever one `radard` picked as the
 lead. Projected through the same calibration as the model's path, so the markers land where the
 model thinks the road is. Nothing is drawn when there are no tracks, so with `BEAMPILOT_RADAR`
-off this is invisible.
+off this is invisible — but openpilot's own stock lead chevron still shows up regardless, since it
+draws on any present lead whether or not radar confirmed it.
 
 ```
-                    ◆        ◆            <- distant tracks, smaller
-              ◆
-                  ( ◆ )                   <- the lead radard settled on
+                    •        •            <- distant tracks, smaller
+              •
+                  ( • )                   <- the lead radard settled on
 ```
 
 This is the bit a lead chevron can't do: a missing chevron could mean no traffic, no radar feed,

@@ -65,8 +65,8 @@ class RadarRendererTest(unittest.TestCase):
     self.renderer = rr.RadarRenderer()
     self.renderer.set_transform(transform())
     self.drawn: list[dict] = []
-    self.renderer._draw_marker = lambda centre, hw, hh, is_lead: self.drawn.append(
-      {"x": centre[0], "y": centre[1], "half_w": hw, "half_h": hh, "lead": is_lead})
+    self.renderer._draw_marker = lambda centre, radius, is_lead, fill, edge: self.drawn.append(
+      {"x": centre[0], "y": centre[1], "radius": radius, "lead": is_lead})
 
   def tearDown(self):
     rr.ui_state, rr.RADAR_INDICATOR = self.previous_ui, self.previous_flag
@@ -131,20 +131,18 @@ class TestWhereTheyLand(RadarRendererTest):
   def test_nearer_tracks_are_bigger(self):
     near = self.render([point(1, 15.0, 0.0)])[0]
     far = self.render([point(1, 90.0, 0.0)])[0]
-    self.assertGreater(near["half_w"], far["half_w"])
+    self.assertGreater(near["radius"], far["radius"])
 
   def test_marker_size_stays_within_its_clamps(self):
     for distance in (1.0, 5.0, 25.0, 80.0, 149.0):
       drawn = self.render([point(1, distance, 0.0)])
       if drawn:
-        self.assertGreaterEqual(drawn[0]["half_w"], rr.MIN_HALF_PX, f"{distance}m")
-        self.assertLessEqual(drawn[0]["half_w"], rr.MAX_HALF_PX, f"{distance}m")
+        self.assertGreaterEqual(drawn[0]["radius"], rr.MIN_RADIUS_PX, f"{distance}m")
+        self.assertLessEqual(drawn[0]["radius"], rr.MAX_RADIUS_PX, f"{distance}m")
 
-  def test_the_shape_is_fixed_not_flattened_by_distance(self):
-    # A physically flat diamond goes edge-on past ~30m and renders as a dash.
-    for distance in (15.0, 45.0, 120.0):
-      drawn = self.render([point(1, distance, 0.0)])[0]
-      self.assertAlmostEqual(drawn["half_h"] / drawn["half_w"], rr.MARKER_ASPECT, places=5)
+  # The marker is a screen-space circle now, so there is no aspect to preserve:
+  # it cannot flatten edge-on the way a shape lying on the road plane does past
+  # ~30m. Perspective still sets the SIZE, which the two tests above cover.
 
 
 class TestTheLeadRing(RadarRendererTest):

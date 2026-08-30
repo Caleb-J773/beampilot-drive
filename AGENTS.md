@@ -386,6 +386,20 @@ first.
 - **Reusing a Lua table across scans means `table.sort` sorts the leftovers too.** Radar rows are
   pooled to keep the GC out of the 20Hz loop, so the array still holds rows from whenever traffic
   was heaviest. Sort the ACTIVE PREFIX only, or vehicles that have gone get re-reported.
+- **The Lua beam is a straight cone off the current heading and grows wider than a lane fast.**
+  `beampilot.lua`'s scan gate is `halfWidthM + spread * dRel`; the stock defaults (3.0, 0.07)
+  reach 6.5m half-width by 50m and 10.7m by max range — nearly three lanes — which is how it
+  locked onto traffic in the next lane over before anything downstream even ran. Narrowed to
+  1.8/0.025 (matching `BEAMPILOT_RADAR_LEAD_HALF_WIDTH_M`'s own "in lane" assumption), but this
+  cone does NOT follow a bend the way `get_radar_only_lead`'s path-relative test does — too narrow
+  and a real in-lane car drops out mid-corner. Widen `_SPREAD` first if that happens.
+- **`match_vision_to_track()`'s own probability score has no lateral veto**, and stock has good
+  reason not to add one — a real radar's bearing estimate is genuinely noisy, and rejecting a
+  drifted-but-real return is worse than a slightly-off match. With GROUND-TRUTH points (only when
+  `BEAMPILOT_RADAR` is on) that noise doesn't exist, so `radard.py` adds a hard gate against the
+  camera's own believed lead position (`RADAR_LEAD_HALF_WIDTH`) that stays off otherwise — a same-
+  distance, same-speed car one lane over in traffic can otherwise outscore the correct match on
+  `prob_d * prob_y * prob_v` alone.
 
 ### Curve braking / longitudinal limits
 
@@ -449,6 +463,16 @@ first.
 - **`rl.draw_line_ex` has butt caps**, so two strokes meeting at a point leave a notch. Cap it with a
   disc — and dim by colour value, never alpha, or the overlap composites into a bright spot exactly
   where the disc is.
+- **A screen-space `rl.draw_circle_v` marker, unlike a 3D shape projected onto the road, does not
+  need the FIXED-shape treatment above at all** — its size still comes from perspective (project the
+  footprint, take the pixel radius), but the circle itself is drawn flat in 2D, so it never flattens
+  edge-on the way a shape lying on the road plane would past ~30m. Simpler than a fixed aspect ratio
+  when a circle already reads as the right thing (radar_renderer.py's dots).
+- **`model_renderer.py`'s stock lead chevron already covers a vision-only lead.** `_update_leads()`
+  only checks `lead_data.present`, never `lead_data.radar`, and `render_lead_indicator` only
+  requires `openpilotLongitudinalControl` — which this fork always has on. Before adding "what is
+  it actually reacting to" visibility to `radar_renderer.py`, check whether the stock chevron
+  already answers it; it does for source, just not for "which of the dots on screen is that".
 - **`get_current_monitor()` on a probe window is not deterministic.** The UI's auto-scale opened a
   1x1 window to ask which screen it was on; with two monitors that answer changed between runs, and
   half the time it sized the window for the wrong one. Fit the SMALLEST monitor. Auto-scale also has

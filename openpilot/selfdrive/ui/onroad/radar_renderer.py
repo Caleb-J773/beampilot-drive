@@ -8,9 +8,15 @@ them is always "is it seeing what I think it is", which a lead chevron cannot
 answer: a missing chevron could mean no traffic, no radar feed, a stale mod, or
 a lead the model rejected.
 
-So: a diamond on the road under every track, and a ring around whichever one
-radard picked as the lead. Nothing is drawn when there are no tracks, so with
-BEAMPILOT_RADAR off this is invisible.
+So: a cyan dot on the road under every scanned track (radar/minimap
+convention for a detection, not a shape openpilot's own UI uses elsewhere),
+and a concentric ring around whichever one radard picked as the lead. Nothing
+is drawn when there are no tracks, so with BEAMPILOT_RADAR off this is
+invisible. (model_renderer.py already puts its own chevron on radarState's
+lead regardless of source -- vision-only or radar-confirmed -- whenever
+openpilot has longitudinal control, so a vision-only lead with no scanned
+track is never actually invisible; this widget only adds the "which of the
+tracks on screen is that" answer a plain chevron can't give.)
 
 Projection is the same one ModelRenderer uses -- car space (x forward, y RIGHT,
 z down) through the calibration and video transforms -- so the markers land
@@ -41,13 +47,7 @@ FOOTPRINT_LEN = 1.3
 FOOTPRINT_WIDTH = 0.9
 # ...but clamped in pixels afterwards, or a track at 120m is two pixels across
 # and invisible, which defeats the point of drawing it.
-MIN_HALF_PX, MAX_HALF_PX = 8.0, 62.0
-# The marker keeps a fixed shape rather than a physically flat one. A diamond
-# lying on the road plane is nearly edge-on past ~30m -- geometrically right,
-# but it renders as a dash and stops reading as a marker. Perspective sets the
-# SIZE; this sets the shape. (openpilot's own lead chevron stands up for the
-# same reason.)
-MARKER_ASPECT = 0.55
+MIN_RADIUS_PX, MAX_RADIUS_PX = 6.0, 42.0
 CLIP_MARGIN = 200
 
 
@@ -87,39 +87,42 @@ class RadarRenderer(Widget):
     for point in points:
       if not 0.0 < point.dRel <= MAX_DRAW_DISTANCE:
         continue
-      # car space is y-RIGHT; radar yRel is y-LEFT.
-      car_y = -point.yRel
-      centre = self._map_to_screen(point.dRel, car_y, self._path_offset_z, rect)
+      centre, radius = self._project(point.dRel, point.yRel, rect)
       if centre is None:
         continue
-      # Project the footprint's far corner too, so the marker's size comes out
-      # of the same perspective as the road rather than an invented curve.
-      edge = self._map_to_screen(point.dRel - FOOTPRINT_LEN, car_y + FOOTPRINT_WIDTH,
-                                 self._path_offset_z, rect)
-      if edge is None:
-        continue
-      half_w = float(np.clip(abs(edge[0] - centre[0]), MIN_HALF_PX, MAX_HALF_PX))
-      self._draw_marker(centre, half_w, half_w * MARKER_ASPECT, point.trackId in lead_ids)
+      self._draw_marker(centre, radius, point.trackId in lead_ids, TRACK, TRACK_EDGE)
+
+  def _project(self, d_rel: float, y_rel: float,
+              rect: rl.Rectangle) -> tuple[tuple[float, float] | None, float]:
+    # car space is y-RIGHT; radar yRel is y-LEFT.
+    car_y = -y_rel
+    centre = self._map_to_screen(d_rel, car_y, self._path_offset_z, rect)
+    if centre is None:
+      return None, 0.0
+    # Project the footprint's far corner too, so the marker's size comes out
+    # of the same perspective as the road rather than an invented curve.
+    edge = self._map_to_screen(d_rel - FOOTPRINT_LEN, car_y + FOOTPRINT_WIDTH,
+                               self._path_offset_z, rect)
+    if edge is None:
+      return None, 0.0
+    radius = float(np.clip(abs(edge[0] - centre[0]), MIN_RADIUS_PX, MAX_RADIUS_PX))
+    return centre, radius
 
   @staticmethod
-  def _draw_marker(centre: tuple[float, float], half_w: float, half_h: float, is_lead: bool) -> None:
+  def _draw_marker(centre: tuple[float, float], radius: float, is_lead: bool,
+                   fill: rl.Color, edge_color: rl.Color) -> None:
+    # A dot, not a diamond: this is a sensor blip, and a circle reads as one
+    # (radar/minimap convention) at every viewing angle instead of flattening
+    # to a dash edge-on past ~30m the way a shape with a fixed aspect would.
     x, y = centre
-    # A diamond rather than a circle: flattened by perspective it reads as
-    # lying ON the road, and it is not confusable with the driver-monitoring dot.
-    top = rl.Vector2(x, y - half_h)
-    right = rl.Vector2(x + half_w, y)
-    bottom = rl.Vector2(x, y + half_h)
-    left = rl.Vector2(x - half_w, y)
-    # draw_triangle culls clockwise winding, so both halves go anticlockwise.
-    rl.draw_triangle(top, left, right, TRACK)
-    rl.draw_triangle(right, left, bottom, TRACK)
-    for a, b in ((top, right), (right, bottom), (bottom, left), (left, top)):
-      rl.draw_line_ex(a, b, max(1.5, half_w * 0.09), TRACK_EDGE)
+    center = rl.Vector2(x, y)
+    rl.draw_circle_v(center, radius, fill)
+    rl.draw_ring(center, radius - max(1.5, radius * 0.12), radius, 0, 360, 24, edge_color)
     if is_lead:
-      # A thin ring, not a halo: it marks which track radard settled on without
-      # becoming the loudest thing on the screen.
-      radius = half_w * 1.5
-      rl.draw_ring(rl.Vector2(x, y), radius, radius + max(2.5, half_w * 0.10), 0, 360, 32, LEAD_RING)
+      # One concentric ring outside the dot marks which track radard settled
+      # on -- a target reticle, not a second competing shape.
+      outer = radius + max(3.0, radius * 0.35)
+      rl.draw_ring(center, outer - max(2.0, radius * 0.12), outer, 0, 360, 32, LEAD_RING)
 
   def _map_to_screen(self, in_x: float, in_y: float, in_z: float,
                      rect: rl.Rectangle) -> tuple[float, float] | None:

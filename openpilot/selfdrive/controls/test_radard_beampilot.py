@@ -118,6 +118,44 @@ class TestRadarOnlyLead(unittest.TestCase):
     self.assertIsNone(self.pick(tracks(track(1, -5.0, 0.0))))
 
 
+class TestVisionTrackMatch(unittest.TestCase):
+  """match_vision_to_track() is stock and shared with every car this fork
+  could run, but its distance/speed probability score alone can pick a track
+  in the next lane over one that only just missed on distance -- the two are
+  easy to confuse in traffic moving at a similar speed. With ground-truth
+  points there is no lateral sensor noise to protect against, so a hard gate
+  against the camera's own believed lead position is safe to add; it must
+  stay off for anything that could be a real, noisy radar return."""
+
+  def setUp(self):
+    self.previous = radard.RADAR_GROUND_TRUTH
+
+  def tearDown(self):
+    radard.RADAR_GROUND_TRUTH = self.previous
+
+  def test_rejects_a_track_in_the_next_lane_even_when_distance_and_speed_match(self):
+    radard.RADAR_GROUND_TRUTH = True
+    lead = lead_msg(prob=1.0)  # x=40, y=0 (our lane), v=25
+    wrong_lane = track(1, 40.0 - radard.RADAR_TO_CAMERA, 3.5, v_rel=0.0)
+    self.assertIsNone(radard.match_vision_to_track(25.0, lead, tracks(wrong_lane)))
+
+  def test_accepts_a_track_that_is_actually_in_lane(self):
+    radard.RADAR_GROUND_TRUTH = True
+    lead = lead_msg(prob=1.0)
+    in_lane = track(1, 40.0 - radard.RADAR_TO_CAMERA, 0.0, v_rel=0.0)
+    matched = radard.match_vision_to_track(25.0, lead, tracks(in_lane))
+    self.assertIsNotNone(matched)
+    self.assertEqual(matched.identifier, 1)
+
+  def test_the_gate_stays_off_without_ground_truth_radar(self):
+    # A real radar's lateral estimate is genuinely noisy; stock never gates on
+    # it, and this must not start rejecting real returns for having drifted.
+    radard.RADAR_GROUND_TRUTH = False
+    lead = lead_msg(prob=1.0)
+    wrong_lane = track(1, 40.0 - radard.RADAR_TO_CAMERA, 3.5, v_rel=0.0)
+    self.assertIsNotNone(radard.match_vision_to_track(25.0, lead, tracks(wrong_lane)))
+
+
 class TestGetLead(unittest.TestCase):
   def setUp(self):
     self.previous = radard.RADAR_LEADS
