@@ -1,6 +1,21 @@
+import os
+
 Import('env', 'envCython', 'arch', 'msgq_python', 'common_python', 'np_version', 'acados')
 
 gen = "c_generated_code"
+
+# beampilot: COMFORT_BRAKE is substituted into the symbolic cost/constraint
+# expressions by gen_long_ocp() below, so the generated C is a function of
+# BEAMPILOT_COMFORT_BRAKE_SCALE -- but nothing told SCons that. SConstruct sets
+# Decider('MD5-timestamp'), which falls back to comparing content whenever the
+# timestamp moves, so `touch long_mpc.py` (what launch_beampilot.sh used to do)
+# left the MD5 identical and rebuilt nothing. Making the resolved value a Value
+# node puts it in the target's dependency signature directly, so changing the
+# env var is what triggers the rebuild -- no touching, and it survives CacheDir.
+try:
+  _comfort_brake_scale = str(float(os.environ.get("BEAMPILOT_COMFORT_BRAKE_SCALE", "1.0")))
+except ValueError:
+  _comfort_brake_scale = "1.0"   # env_float() falls back to the default too
 
 casadi_model = [
   f'{gen}/long_model/long_expl_ode_fun.c',
@@ -59,6 +74,7 @@ source_list = ['long_mpc.py',
   '#openpilot/selfdrive/modeld/constants.py',
   acados_include_dir.File('acados_c/ocp_nlp_interface.h'),
   acados_template_dir.File('c_templates_tera/acados_solver.in.c'),
+  env.Value(_comfort_brake_scale),   # beampilot, see above
 ]
 
 lenv = env.Clone()

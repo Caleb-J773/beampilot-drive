@@ -286,9 +286,18 @@ def build_sections() -> list[Section]:
               value_labels={"0": "aggressive", "1": "standard", "2": "relaxed"}),
       Setting("BEAMPILOT_T_FOLLOW_SCALE", "Follow gap scale",
               "Multiplier on top of the following-distance time gap above. Stock is 1.0; lower"
-              + " shrinks the gap further and delays the braking point. Braking distance still grows"
-              + " with the square of speed regardless of this setting.",
+              + " shrinks the gap further and delays the braking point. This is the linear term in"
+              + " the safe-distance formula; the quadratic term below dominates at real speed.",
               "1.0", numeric=True, step=0.1),
+      Setting("BEAMPILOT_COMFORT_BRAKE_SCALE", "Comfort brake scale",
+              "Multiplier on the assumed comfortable braking (stock 2.5 m/s^2). This sets the"
+              + " APPROACH to something slower or stopped, not the steady-state gap: the same term"
+              + " applies to the lead's own stopping distance, so at a matched speed the two cancel"
+              + " and the gap is just t_follow*v + 6m. Raise to brake later and harder, lower to"
+              + " brake earlier and softer. Both halves must agree -- a value that reaches only one"
+              + " of them makes the planner demand a huge gap and stop dead to open it.",
+              "1.0", numeric=True, step=0.1,
+              warn="build-time setting -- compiled into the MPC solver, so it needs a rebuild (relaunch)"),
       Setting("BEAMPILOT_MAX_ENGAGE_SPEED_SCALE", "Max engage speed scale",
               "Multiplier on the max speed openpilot may be engaged/set at. Stock is 1.0 (145 km/h,"
               + " from the model's training distribution, not a car limit); the shipped configuration"

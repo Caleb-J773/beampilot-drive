@@ -118,13 +118,27 @@ def _libflags(target, source, env, for_signature):
   return _stripixes(env['LIBLINKPREFIX'], libs, env['LIBLINKSUFFIX'],
                     env['LIBPREFIXES'], env['LIBSUFFIXES'], env, env['LIBLITERALPREFIX'])
 
+# beampilot: this ENV is an explicit whitelist, not os.environ, so a build step
+# that shells out to python3 sees NOTHING of config_beampilot.sh. Almost every
+# BEAMPILOT_* knob is read live by a daemon and so does not care -- but
+# BEAMPILOT_COMFORT_BRAKE_SCALE is baked into the acados solver by
+# `python3 long_mpc.py` at codegen time (longitudinal_mpc_lib/SConscript), and
+# without this passthrough that codegen always resolved it to the 1.0 default.
+# The generated C then said v_ego^2/(2*2.5) while the SAME module's
+# get_stopped_equivalence_factor(), running live in plannerd, used the scaled
+# value for the lead -- so the planner credited the lead with braking far harder
+# than itself and demanded ~130m of gap at 67mph, braking to a full stop to get
+# it. Passing the whole prefix through keeps any future codegen-time knob honest.
+beampilot_env = {k: v for k, v in os.environ.items() if k.startswith("BEAMPILOT_")}
+
 env = Environment(
   ENV={
     "PATH": os.environ['PATH'],
     "PYTHONPATH": os.pathsep.join(submodule_python_paths),
     "ACADOS_SOURCE_DIR": acados.DIR,
     "ACADOS_PYTHON_INTERFACE_PATH": acados.TEMPLATE_DIR,
-    "TERA_PATH": acados.TERA_PATH
+    "TERA_PATH": acados.TERA_PATH,
+    **beampilot_env,
   },
   CCFLAGS=[
     "-g",

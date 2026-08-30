@@ -8,7 +8,7 @@ from openpilot.cereal import log
 # min(mpc_target, cruise_target) that bound won whenever it was the lower of
 # the two -- so BEAMPILOT_ACCEL_SCALE raised the planner's clip while the
 # thing producing the number stayed where it was.
-from openpilot.common.beampilot_limits import ACCEL_MAX, ACCEL_MIN, T_FOLLOW_SCALE
+from openpilot.common.beampilot_limits import ACCEL_MAX, ACCEL_MIN, T_FOLLOW_SCALE, COMFORT_BRAKE_SCALE
 from openpilot.common.realtime import DT_MDL
 from openpilot.common.swaglog import cloudlog
 # WARNING: imports outside of constants will not trigger a rebuild
@@ -58,7 +58,10 @@ T_IDXS_LST = [index_function(idx, max_val=MAX_T, max_idx=N) for idx in range(N+1
 T_IDXS = np.array(T_IDXS_LST)
 FCW_IDXS = T_IDXS < 5.0
 T_DIFFS = np.diff(T_IDXS, prepend=[0.])
-COMFORT_BRAKE = 2.5
+# beampilot: BEAMPILOT_COMFORT_BRAKE_SCALE. Baked into the compiled solver --
+# see beampilot_limits.py for why this one needs a forced rebuild to take
+# effect, unlike every other beampilot tunable.
+COMFORT_BRAKE = 2.5 * COMFORT_BRAKE_SCALE
 STOP_DISTANCE = 6.0
 MIN_X_LEAD_FACTOR = 0.5
 

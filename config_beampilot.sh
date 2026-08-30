@@ -88,13 +88,37 @@ export BEAMPILOT_CURVE_SLOWDOWN="0"
 #
 # LONGITUDINAL (accel/braking), as a multiplier on the stock envelope.
 export BEAMPILOT_ACCEL_SCALE="2.0"    # 1.0 = stock (1.6 m/s^2 from a stop)
-export BEAMPILOT_DECEL_SCALE="1.5"    # 1.0 = stock (-1.2 m/s^2 cruise braking)
+export BEAMPILOT_DECEL_SCALE="2.0"    # 1.0 = stock (-1.2 m/s^2 cruise braking); ACCEL_MIN -> -7.0 m/s^2
 
 # Follow gap, on top of BEAMPILOT_PERSONALITY above. 1.0 = stock aggressive
-# (1.25s gap); lower shrinks it further and delays the braking point. Braking
-# distance still grows with the square of speed (COMFORT_BRAKE, unscaled), so
-# this mainly affects when it starts slowing, not the last few metres of it.
-export BEAMPILOT_T_FOLLOW_SCALE="0.7"
+# (1.25s gap); lower shrinks it further and delays the braking point. This is
+# a LINEAR term in the safe-distance formula (v^2/(2*COMFORT_BRAKE) + t_follow*v
+# + STOP_DISTANCE) -- the v^2 term below dominates at real speed, so this alone
+# does less than it looks like against "brakes far too early".
+export BEAMPILOT_T_FOLLOW_SCALE="0.35"    # -> 0.4375s gap at aggressive personality
+
+# The v^2/(2*COMFORT_BRAKE) term above. This does NOT set the steady-state
+# following gap: the same term appears with the LEAD's speed in
+# get_stopped_equivalence_factor(), so at a matched speed the two cancel exactly
+# and the gap is just t_follow*v + STOP_DISTANCE. What it sets is the APPROACH --
+# how much room the planner wants when closing on something slower or stopped.
+# At 30 m/s onto a stationary obstacle: 900/(2*3.0) + 0.4375*30 + 6 = 169m,
+# vs 199m at stock. Raise it to brake later and harder, lower to brake earlier.
+#
+# Was 2.6 -- but that cancellation is exactly what broke. UNLIKE every other
+# value here, this one is compiled into the MPC solver's C code by
+# `python3 long_mpc.py` at build time, and SConstruct's Environment(ENV=...) is
+# a whitelist that did not pass BEAMPILOT_* through, so codegen always resolved
+# it to 1.0 while plannerd used the scaled value live. Our half of the formula
+# ran at 2.5 and the lead's at 6.5, so the planner assumed the lead could stop
+# in a third of the distance we could and demanded ~130m of gap at 67mph,
+# slamming to a full stop to open one. Fixed in SConstruct; keep the value
+# modest now that it actually reaches the solver.
+#
+# Because it is compiled in, launch_beampilot.sh forces a rebuild when this
+# changes (a relaunch, not just a reload); do not skip straight to `scons`
+# after editing this line alone.
+export BEAMPILOT_COMFORT_BRAKE_SCALE="1.2"    # 1.0 = stock 2.5 m/s^2 -> 3.0 m/s^2
 
 # Max speed openpilot may be ENGAGED/SET at. 1.0 = stock 145 km/h (90 mph);
 # above it car_events.py disengages with "Slow down to engage". The set-speed
@@ -297,7 +321,22 @@ export BEAMPILOT_CRUISE_STEP_MPH="1.0"
 # How closely it follows / how late it brakes for the car ahead.
 #   0 = aggressive (1.25s gap, brakes latest)   1 = standard (1.45s)
 #   2 = relaxed    (1.75s gap, brakes earliest)
-export BEAMPILOT_PERSONALITY="0"
+#
+# This sets TWO things, not just the gap -- longitudinal_planner.py feeds it to
+# both mpc.update() (get_T_FOLLOW, above) and mpc.set_weights(), where
+# get_jerk_factor() scales A_CHANGE_COST and J_EGO_COST. Aggressive returns 0.5
+# there, i.e. HALF the penalty on changing acceleration; standard and relaxed
+# both return 1.0. So aggressive is also the setting that makes the MPC twice as
+# willing to jerk, which is why it reads as slamming the brakes rather than
+# tapering onto a lead. Relaxed is no smoother than standard -- same jerk
+# factor, only a wider gap.
+#
+# Was 0. BEAMPILOT_T_FOLLOW_SCALE compresses the three personalities together
+# (at 0.35 the gap difference between aggressive and standard is ~1.3m at
+# 45mph), so aggressive was buying almost no extra closeness in exchange for
+# that 2x jerk discount. Standard is the smoothness setting here; use
+# T_FOLLOW_SCALE, not this, to decide how close to sit.
+export BEAMPILOT_PERSONALITY="1"
 
 # Stop inter-process communication hiccups from blocking engagement and
 # disengaging mid-drive. Unlike the purely visual alerts, commIssue is a REAL
@@ -389,12 +428,14 @@ export BEAMPILOT_SIGNAL_AUTO_CANCEL="1"
 # The mod reports nearby traffic as radar points, straight to card.py, and
 # radard fuses them exactly as it would on a car with a radar.
 #
-# Why it matters: this car is HONDA_CIVIC_2022, which openpilot knows as
-# BOSCH_RADARLESS -- opendbc hands radard an EMPTY RadarData at 20Hz and lead
-# detection falls back entirely on the camera. The same camera that, per the
-# README, is fed wide-lens intrinsics for an image that is not wide. How far
-# away the car in front is happens to be exactly what that gets wrong.
-export BEAMPILOT_RADAR="0"
+# Why it matters: this fingerprint is Bosch radarless -- opendbc hands radard
+# an EMPTY RadarData at 20Hz and lead distance/velocity fall back entirely on
+# the camera, with no ground truth to correct it. That is the likely cause of
+# openpilot occasionally braking to a full stop behind a car that never
+# actually stopped -- a bad vision velocity estimate for a couple of frames is
+# enough. RADAR_LEADS below stays off, so this only REFINES a lead the camera
+# already confirmed; it cannot invent one the camera missed.
+export BEAMPILOT_RADAR="1"
 
 # Let a ground-truth track become the lead on its own, with no confirmation
 # from the camera. Stock openpilot refuses to, because a real radar returns
@@ -430,8 +471,18 @@ export BEAMPILOT_RADAR_LEADS="0"
 #                                             # seen a lead at 150m, so handing openpilot
 #                                             # one makes it start managing distance far
 #                                             # earlier than it otherwise would
-# export BEAMPILOT_RADAR_HALF_WIDTH_M="3.0"   # beam half-width at the bumper...
-# export BEAMPILOT_RADAR_SPREAD="0.07"        # ...growing per metre of range
+# Beam half-width: at stock 3.0 + 0.07/m, the cone is 6.5m half-width by 50m
+# out and 10.7m by max range -- nearly three lanes wide, which is what let it
+# lock onto traffic in the next lane over. Narrowed to roughly one lane
+# (matching BEAMPILOT_RADAR_LEAD_HALF_WIDTH_M's own 1.8m "in our lane"
+# assumption) plus a little growth for road camber and steering wander.
+# TRADEOFF: this scan is a straight cone off the current heading, with no
+# curve-following the way the RADAR_LEADS in-lane test has (that one reads
+# modelV2's own predicted path) -- too narrow and a real in-lane car WILL drop
+# out of the beam partway round a tight bend. Widen spread first if that shows
+# up before touching the base half-width back toward stock.
+export BEAMPILOT_RADAR_HALF_WIDTH_M="1.8"   # beam half-width at the bumper...
+export BEAMPILOT_RADAR_SPREAD="0.025"       # ...growing per metre of range
 # export BEAMPILOT_RADAR_MAX_TRACKS="12"
 # export BEAMPILOT_RADAR_RATE_HZ="20"         # DT_MDL; radard runs at the model's rate
 # export BEAMPILOT_RADAR_PORT="49155"         # mod -> card, loopback only

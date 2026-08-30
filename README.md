@@ -376,9 +376,26 @@ the reason it won't take a corner.
 | `BEAMPILOT_ACTUATION_MARGIN` | `2.0` | Headroom the excessive-actuation check keeps above the limits above. |
 | `BEAMPILOT_CURVE_SLOWDOWN` | `0` | **Experimental.** Brake for a corner *before* reaching it. See [below](#slowing-down-for-corners-experimental-off-by-default). |
 | `BEAMPILOT_CURVE_LAT_ACCEL` | `0.7 ×` lateral limit | The cornering force to aim for, which sets the speed it slows to. |
-| `BEAMPILOT_PERSONALITY` | `1` | Follow distance: `0` aggressive (1.25 s), `1` standard (1.45 s), `2` relaxed (1.75 s). |
-| `BEAMPILOT_T_FOLLOW_SCALE` | `1.0` | Multiplier on top of the follow-distance time gap above. Lower shrinks it further and delays the braking point; braking distance still grows with the square of speed regardless. |
+| `BEAMPILOT_PERSONALITY` | `1` | Follow distance: `0` aggressive (1.25 s), `1` standard (1.45 s), `2` relaxed (1.75 s). Also sets the **jerk factor** (`get_jerk_factor`), which scales the MPC's `A_CHANGE_COST`/`J_EGO_COST`: `0` returns 0.5, i.e. half the penalty on changing acceleration, so aggressive is jerkier as well as closer. `1` and `2` both return 1.0 — relaxed is no smoother than standard, only further back. |
+| `BEAMPILOT_T_FOLLOW_SCALE` | `1.0` | Multiplier on top of the follow-distance time gap above (the *linear* term in the safe-distance formula). |
+| `BEAMPILOT_COMFORT_BRAKE_SCALE` | `1.0` | Multiplier on the assumed comfortable braking (stock 2.5 m/s²). This sets how the car **approaches** something slower or stopped, *not* the steady-state gap — the same term applies to the lead's own stopping distance, so at a matched speed the two cancel and the gap is just `t_follow*v + 6 m`. Raise to brake later and harder, lower to brake earlier and softer. **Compiled into the MPC solver; see the warning below.** |
 | `BEAMPILOT_MAX_ENGAGE_SPEED_SCALE` | `1.0` | Multiplier on the max speed openpilot may be engaged/set at (stock 145 km/h / 90 mph — the model's training distribution, not a car limit). Raises `V_CRUISE_MAX` and the `speedTooHigh` ceiling together. |
+
+> [!WARNING]
+> **`BEAMPILOT_COMFORT_BRAKE_SCALE` is compiled, not read live.** Every other setting on this page
+> takes effect the moment you relaunch. This one is baked into the acados MPC solver's C code at
+> build time (`long_mpc.py`'s `gen_long_ocp()`). The build now tracks the value properly — SCons
+> passes `BEAMPILOT_*` into the build environment, and the resolved scale is a dependency of the
+> codegen step — so editing `config_beampilot.sh` and relaunching is enough, and a manual `scons`
+> works too as long as you sourced the config first.
+>
+> If you want to confirm what the solver was actually built with, grep the generated C for the
+> `2*COMFORT_BRAKE` divisor (it prints `5.` at stock 2.5, `6.` at scale 1.2, and so on):
+>
+> ```bash
+> grep -A2 'a3=casadi_sq(a2);' \
+>   openpilot/selfdrive/controls/lib/longitudinal_mpc_lib/c_generated_code/long_cost/long_cost_y_fun.c
+> ```
 
 > [!IMPORTANT]
 > **Three ceilings, not one.** Until recently the two above were the only ones that moved, which
@@ -1469,7 +1486,12 @@ never runs there, since that driver is disabled.
 | Steers but runs wide on corners | Steering lock wrong, or limits binding | Set `BEAMPILOT_STEER_LOCK_DEG`; check the BINDING line |
 | Weaving / oscillation | `BEAMPILOT_MAX_LAT_JERK` too high | Lower it toward 5.0 first |
 | Doesn't accelerate | `openpilotLongitudinalControl` false | Confirm `AlphaLongitudinalEnabled` was set at launch |
-| Brakes too early for traffic | Follow distance | `BEAMPILOT_PERSONALITY=0`; still early, also lower `BEAMPILOT_T_FOLLOW_SCALE` |
+| Brakes too early for traffic | Approach distance | Raise `BEAMPILOT_COMFORT_BRAKE_SCALE`; lower `BEAMPILOT_T_FOLLOW_SCALE` to sit closer once settled |
+| Slams to a stop for a car that is still moving, then sets off again | Compiled `COMFORT_BRAKE` disagreeing with the live one | Confirm the built solver matches — see the grep under the settings table. A scale that never reached codegen makes the planner assume the lead brakes harder than it does, demanding a huge gap |
+| Braking is harsh / jerky rather than a taper | `BEAMPILOT_PERSONALITY=0` halves the jerk costs | Use `1` (standard). It also doubles `A_CHANGE_COST`/`J_EGO_COST`, and costs ~1.3 m of gap at 45 mph. `2` is no smoother than `1` — same jerk factor, wider gap |
+| Chases the lead instead of holding a gap | `BEAMPILOT_T_FOLLOW_SCALE` too tight to absorb lead speed changes | Raise toward `0.5`–`0.6` |
+| Stops fully behind a car that never actually stopped | Vision-only lead velocity has no ground truth to correct it | `BEAMPILOT_RADAR=1` (leave `BEAMPILOT_RADAR_LEADS=0`) — refines the camera's lead instead of trusting its raw velocity guess |
+| Radar locks onto traffic in another lane | Beam wider than a lane at range (stock 3.0 + 0.07/m ≈ 3 lanes by max range) | Narrow `BEAMPILOT_RADAR_HALF_WIDTH_M` / `_SPREAD` |
 | Lane change arms but never commits | Needs the steering nudge | `BEAMPILOT_AUTO_LANE_CHANGE=1` |
 | Bursts of `observation too old` | `modeld` behind, GPU contention | Lower BeamNG's graphics settings |
 | `Address already in use` on 49152 | A previous `beamngd` still running | `pkill -f beamngd.py` |

@@ -122,13 +122,13 @@ simulates has BSM messages in its DBC.
 | `selfdrive/controls/lib/desire_helper.py` | `BEAMPILOT_AUTO_LANE_CHANGE` — commit on the blinker alone; `BEAMPILOT_LANE_CHANGE_ABORT` — cancel one in flight on a blind spot |
 | `selfdrive/controls/lib/drive_helpers.py` | `BEAMPILOT_MAX_LAT_ACCEL` / `_JERK` / `MAX_CURVATURE` |
 | `selfdrive/controls/lib/longitudinal_planner.py` | `BEAMPILOT_ACCEL_SCALE` / `_DECEL_SCALE` |
-| `selfdrive/controls/lib/longitudinal_mpc_lib/long_mpc.py` | `BEAMPILOT_T_FOLLOW_SCALE` — multiplier on `get_T_FOLLOW()`'s time gap, on top of `BEAMPILOT_PERSONALITY` |
+| `selfdrive/controls/lib/longitudinal_mpc_lib/long_mpc.py` | `BEAMPILOT_T_FOLLOW_SCALE` — multiplier on `get_T_FOLLOW()`'s time gap, on top of `BEAMPILOT_PERSONALITY`; `BEAMPILOT_COMFORT_BRAKE_SCALE` — multiplier on `COMFORT_BRAKE`, **compiled into the MPC solver, not read live** (see gotchas) |
 | `selfdrive/selfdrived/selfdrived.py` | `BEAMPILOT_IGNORE_COMM_ISSUE`; also the "Lane Change Cancelled" alert, added straight to the `AlertManager` |
 | `selfdrive/car/card.py` | `BEAMPILOT_BSM` — overlay blind spot onto `carState`; `BEAMPILOT_RADAR` — fill in the empty `RadarData` (see gotchas) |
 | `selfdrive/car/car_events.py`, `selfdrive/car/cruise.py` | `BEAMPILOT_MAX_ENGAGE_SPEED_SCALE` — raises `MAX_CTRL_SPEED` (the `speedTooHigh` disengage ceiling) and `V_CRUISE_MAX` (max set speed) together |
 | `tools/opendbc_beampilot_car/` | our own opendbc platform, `BEAMPILOT` — the car openpilot is actually driving |
 | `tools/install_beampilot_car.py` | installs that platform into the opendbc submodule; run from setup AND launch |
-| `selfdrive/controls/radard.py` | `BEAMPILOT_RADAR_LEADS` — let a ground-truth track be the lead with no vision confirmation |
+| `selfdrive/controls/radard.py` | `BEAMPILOT_RADAR_LEADS` — let a ground-truth track be the lead with no vision confirmation; `match_vision_to_track()` also gates on lateral position (only when `BEAMPILOT_RADAR` is on) so it can't pick a next-lane car that merely scored well on distance/speed |
 | `selfdrive/ui/onroad/augmented_road_view.py` | renders `BlindSpotRenderer` at the file's own "custom UI extension point" |
 | `selfdrive/beamcamd/beamcamd.py` + `openpilot_cam` | `BEAMPILOT_CAMERA_MODE` — narrow-only, or a wide render plus centred narrow crop |
 | `system/manager/process_config.py` | adds `beamngd`/`beamcamd`, drops the hardware-only processes |
@@ -399,6 +399,36 @@ first.
   the car is already in.
 - **capnp lists are NOT Python lists** — see Testing above. This is exactly how the curve limiter
   took `plannerd` down once.
+- **`COMFORT_BRAKE` appears TWICE in `long_mpc.py`, and only one of them is compiled. They must
+  agree.** `get_safe_obstacle_distance(v_ego)` = `v^2/(2*COMFORT_BRAKE) + t_follow*v +
+  STOP_DISTANCE` is called from `gen_long_ocp()`, so it is substituted into the symbolic
+  cost/constraint expressions at CODEGEN time and lives only in the compiled solver.
+  `get_stopped_equivalence_factor(v_lead)` = `v_lead^2/(2*COMFORT_BRAKE)` is called from
+  `update()`, live in plannerd. Upstream shares one constant between them deliberately: at a
+  matched speed the two quadratic terms CANCEL and the steady-state gap is just
+  `t_follow*v + STOP_DISTANCE`. `COMFORT_BRAKE` therefore does not set the following gap at all —
+  it sets the APPROACH to something slower or stopped.
+  Break that symmetry and the planner credits the lead with braking harder than itself, so every
+  moving car is treated as roughly a wall. `BEAMPILOT_COMFORT_BRAKE_SCALE` at 2.6 did exactly
+  that — ours ran at 2.5, the lead's at 6.5 — and demanded a ~130m gap at 67mph, braking to a
+  dead stop to open one, then accelerating once it cleared. Stop-and-go with no lead doing
+  anything unusual, on vision leads and radar leads alike.
+- **Two separate SCons mechanisms hid that for the entire life of the feature.** `SConstruct`'s
+  `Environment(ENV={...})` is an explicit whitelist and SCons deliberately does not inherit
+  `os.environ`, so `python3 long_mpc.py` codegen never saw `BEAMPILOT_COMFORT_BRAKE_SCALE` and
+  always resolved it to the 1.0 default. And `SConstruct` sets `Decider('MD5-timestamp')`, which
+  falls back to comparing CONTENT when the timestamp moves — so the old `touch long_mpc.py` +
+  sentinel hack in `launch_beampilot.sh` never triggered a rebuild either (`CacheDir` would have
+  served the identical artifact regardless). Both are fixed: `SConstruct` passes the whole
+  `BEAMPILOT_*` prefix into the build env, and `longitudinal_mpc_lib/SConscript` puts the resolved
+  scale in the codegen `source_list` as an `env.Value()` node, so the VALUE is in the dependency
+  signature. **Do not go back to touching a file to force a rebuild — under this decider it does
+  nothing.** Verify a change to this knob by grepping the generated C for the divisor:
+  `grep -A2 'a3=casadi_sq(a2);' c_generated_code/long_cost/long_cost_y_fun.c` prints `2*COMFORT_BRAKE`.
+- **`test_following_distance.py` cannot catch a compiled/live mismatch.** It computes equilibrium
+  as `get_safe_obstacle_distance() - get_stopped_equivalence_factor()`, both imported from the
+  Python module, so it is internally consistent no matter what the solver was actually built with.
+  The generated C is the only source of truth for the compiled half.
 
 ### UI / rendering
 

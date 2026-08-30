@@ -13,6 +13,16 @@ python3 "$DIR/tools/install_beampilot_car.py" --quiet || {
   export FINGERPRINT="HONDA_CIVIC_2022"
 }
 
+# BEAMPILOT_COMFORT_BRAKE_SCALE is compiled straight into the acados MPC
+# solver's C code (long_mpc.py's gen_long_ocp()), unlike every other BEAMPILOT_*
+# limit, which is read live. There used to be a touch-the-source-file + sentinel
+# hack here to force the rebuild; it never worked -- SConstruct sets
+# Decider('MD5-timestamp'), so a touch with unchanged content is still "up to
+# date". The rebuild is now driven properly, by an env.Value() dependency in
+# longitudinal_mpc_lib/SConscript, and SConstruct passes BEAMPILOT_* into the
+# build environment so the codegen can actually see the value. Nothing to do
+# here beyond having sourced config_beampilot.sh above.
+
 # Seeds CalibrationParams (validBlocks=20, rpyCalib=[0,0,0]) only when there
 # is no learned calibration yet, so calibrationd starts "calibrated" instead
 # of requiring minutes of sustained 15+mph
