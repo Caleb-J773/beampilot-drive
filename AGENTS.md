@@ -273,6 +273,10 @@ first.
   against the displayed set speed. `OPENPILOT_PREFIX=beampilot` isolates msgq, VisionIPC, Params
   and logs, and `launch_beampilot.sh` holds `/tmp/beampilot-$UID.lock` to reject a duplicate
   beampilot launch. Standalone channel tools must select that prefix before importing messaging.
+- **Desktop Chestnut has no physical USB Chestnut.** `deviceState.chestnutPresent` only detects
+  comma's accessory, so using it directly makes a healthy desktop big model raise `bigModelFailed`
+  as soon as controls engage. Code that checks big-model availability must use
+  `modeld.helpers.usbgpu_available()`; on comma hardware it still requires the real USB device.
 
 ### Car model / CAN
 

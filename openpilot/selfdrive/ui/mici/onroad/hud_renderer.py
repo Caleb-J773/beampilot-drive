@@ -10,6 +10,7 @@ from openpilot.system.ui.lib.text_measure import measure_text_cached
 from openpilot.system.ui.widgets import Widget
 from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.cereal import log
+from openpilot.selfdrive.modeld.helpers import usbgpu_available
 
 EventName = log.OnroadEvent.EventName
 
@@ -200,7 +201,7 @@ class HudRenderer(Widget):
     if ui_state.sm.recv_frame['selfdriveState'] < ui_state.started_frame:
       return
 
-    big_failed = (ui_state.usbgpu_active is False or not ui_state.sm['deviceState'].chestnutPresent or
+    big_failed = (ui_state.usbgpu_active is False or not usbgpu_available(ui_state.sm['deviceState'].chestnutPresent) or
                   (ui_state.usbgpu_active is True and ui_state.sm.recv_frame['modelV2'] > ui_state.started_frame and
                    not ui_state.sm.alive['modelV2']) or
                   (ui_state.usbgpu_active is None and ui_state.sm.recv_frame['modelV2'] > ui_state.started_frame))

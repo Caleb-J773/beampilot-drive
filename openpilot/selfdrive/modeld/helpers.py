@@ -8,7 +8,7 @@ import tempfile
 from pathlib import Path
 
 from openpilot.common.file_chunker import get_manifest_path
-from openpilot.common.hardware.usb import CHESTNUT_FW_VERSION, CHESTNUT_USB_IDS, USB_DEVICES_PATH
+from openpilot.common.hardware import PC
 
 MODELS_DIR = Path(__file__).resolve().parent / 'models'
 TG_INPUT_DEVICES_PATH = MODELS_DIR / 'tg_input_devices.json'
@@ -48,6 +48,16 @@ def load_oob(f):
 
 def usbgpu_present() -> bool:
   return os.environ.get("CHESTNUT") == "1"
+
+
+def usbgpu_available(chestnut_present: bool, pc: bool = PC) -> bool:
+  """Whether the configured big-model device is available to this host.
+
+  comma hardware requires the physical Chestnut USB device. On desktop,
+  CHESTNUT selects the local big model and runs it on the configured PC GPU.
+  """
+  return chestnut_present or (pc and usbgpu_present())
+
 
 def usbgpu_compiled() -> bool:
   return Path(get_manifest_path(modeld_pkl_path(usbgpu=True))).is_file()

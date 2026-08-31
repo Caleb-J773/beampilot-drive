@@ -18,6 +18,7 @@ from openpilot.common.gps import get_gps_location_service
 
 from openpilot.selfdrive.car.car_events import CarEvents
 from openpilot.selfdrive.locationd.helpers import PoseCalibrator, Pose
+from openpilot.selfdrive.modeld.helpers import usbgpu_available
 # Priority is aliased: common.realtime already exports a Priority (thread
 # scheduling), and this one is alert ordering. Two very different things.
 from openpilot.selfdrive.selfdrived.events import (Alert, AlertSize, AlertStatus, AudibleAlert,
@@ -194,7 +195,7 @@ class SelfdriveD:
       self.events.add(EventName.bigModelLoading)
 
     big_active = self.params.get("UsbGpuActive")
-    usbgpu_present = self.sm['deviceState'].chestnutPresent
+    usbgpu_present = usbgpu_available(self.sm['deviceState'].chestnutPresent)
     model_unavailable = big_active is True and self.sm.seen['modelV2'] and not self.sm.alive['modelV2']
     big_failed = big_active is False or model_unavailable or (self.big_model_active and not usbgpu_present)
     if big_failed and not self.big_model_failed:

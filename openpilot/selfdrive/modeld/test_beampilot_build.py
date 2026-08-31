@@ -1,9 +1,20 @@
 import unittest
+from unittest.mock import patch
 
 from openpilot.selfdrive.modeld.beampilot_build import usbgpu_build_config
+from openpilot.selfdrive.modeld.helpers import usbgpu_available
 
 
 class TestChestnutBuildDevice(unittest.TestCase):
+  def test_desktop_big_model_does_not_require_usb_chestnut(self):
+    with patch.dict("os.environ", {"CHESTNUT": "1"}):
+      assert usbgpu_available(chestnut_present=False, pc=True)
+
+  def test_comma_hardware_still_requires_usb_chestnut(self):
+    with patch.dict("os.environ", {"CHESTNUT": "1"}):
+      assert not usbgpu_available(chestnut_present=False, pc=False)
+      assert usbgpu_available(chestnut_present=True, pc=False)
+
   def test_desktop_cuda_uses_selected_backend_and_visibility(self):
     flags, queue = usbgpu_build_config(
       "x86_64", "CUDA",
