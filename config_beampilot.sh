@@ -754,11 +754,9 @@ export BIG="1"
 # for comma hardware; it can run on desktop with enough resources
 # anyone without a strong dedicated dGPU should use non-chestnut
 # see more about it in the readme or online at comma.ai in a blogpost somewhere
-# NOTE: modeld/helpers.py's usbgpu_present() just returns CHESTNUT=="1" -- there's
-# no real USB eGPU accessory detection here. Setting this to 1 forces the "big"
-# model build to hardcode DEV=AMD (openpilot/selfdrive/modeld/SConscript's
-# usbgpu_tg_flags), regardless of USE_NV/USE_AMD above. Leave this 0 unless you
-# actually have a comma Chestnut USB eGPU plugged in.
+# On a desktop, this compiles and runs the big model on the backend and GPU
+# resolved above. The upstream comma ARM path still uses its real external AMD
+# Chestnut accessory.
 export CHESTNUT="0"
 
 # --- added by tools/beampilot_tui.py ---

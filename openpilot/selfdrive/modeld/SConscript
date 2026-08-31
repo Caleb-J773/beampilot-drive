@@ -6,6 +6,7 @@ from SCons.Script import Action, Value
 from openpilot.common.file_chunker import chunk_file, get_chunk_targets, get_existing_chunks
 from openpilot.common.transformations.camera import _ar_ox_fisheye, _os_fisheye
 from openpilot.common.transformations.model import MEDMODEL_INPUT_SIZE, DM_INPUT_SIZE
+from openpilot.selfdrive.modeld.beampilot_build import usbgpu_build_config
 from openpilot.selfdrive.modeld.constants import ModelConstants
 from openpilot.selfdrive.modeld.helpers import TG_INPUT_DEVICES_PATH, usbgpu_present, modeld_pkl_path
 
@@ -28,6 +29,7 @@ def estimate_pickle_max_size(onnx_size):
 
 if arch == 'comma_arm64':
   tg_backend = 'QCOM'
+  tg_device = tg_backend
   tg_flags = f'DEV={tg_backend} IMAGE=1 FLOAT16=1 NOLOCALS=1 JIT_BATCH_SIZE=0 OPENPILOT_HACKS=1'
 else:
   # beampilot: which tinygrad backend, and which physical GPU, the model is
@@ -50,6 +52,7 @@ else:
   tg_backend = os.getenv('BEAMPILOT_TG_BACKEND', '')
   tg_dev = os.getenv('BEAMPILOT_TG_DEV', '')
   if tg_backend and tg_dev:
+    tg_device = tg_dev
     tg_flags = _visible(os.getenv('CUDA_VISIBLE_DEVICES', '')) + f'DEV={tg_dev}'
   else:
     # Standalone build with nothing sourced. USE_NV/USE_AMD are the upstream
@@ -63,28 +66,33 @@ else:
       # BEFORE the '+'. "DEV=NV:1" -- which is what this used to emit -- parses
       # as renderer "1" (Target.parse in tinygrad/helpers.py) and opens GPU 0
       # anyway, so a multi-GPU build was quietly compiled for the wrong card.
-      tg_flags = f'DEV=:{_gpu_idx}+{tg_backend}'
+      tg_device = f':{_gpu_idx}+{tg_backend}'
+      tg_flags = f'DEV={tg_device}'
     elif tg_backend in ('CUDA', 'CL') and _gpu_idx.isdigit():
+      tg_device = tg_backend
       tg_flags = _visible(_gpu_idx) + f'DEV={tg_backend}'
     elif tg_backend:
+      tg_device = tg_backend
       tg_flags = f'DEV={tg_backend}'
     else:
       tg_backend = 'CPU'
+      tg_device = 'CPU' if arch == 'Darwin' else 'CPU:LLVM'
       tg_flags = 'DEV=CPU' if arch == 'Darwin' else 'DEV=CPU:LLVM'
+
+usbgpu_tg_flags, usbgpu_queue_device = usbgpu_build_config(arch, tg_device, tg_flags)
 
 tg_devices = { # which device to put jit inputs to at runtime
   'openpilot.selfdrive.modeld.modeld': {
-    'default': {'WARP_DEV': tg_backend, 'QUEUE_DEV': tg_backend},
-    'usbgpu': {'WARP_DEV': tg_backend, 'QUEUE_DEV': 'AMD'}
+    'default': {'WARP_DEV': tg_device, 'QUEUE_DEV': tg_device},
+    'usbgpu': {'WARP_DEV': tg_device, 'QUEUE_DEV': usbgpu_queue_device}
   },
   'openpilot.selfdrive.modeld.dmonitoringmodeld': {
-    'default': {'DEV': tg_backend}
+    'default': {'DEV': tg_device}
   },
 }
 
 USBGPU = usbgpu_present()
 if USBGPU:
-  usbgpu_tg_flags = f'DEBUG=2 DEV=AMD WARP_DEV={tg_backend} FLOAT16=1 JIT_BATCH_SIZE=0 GMMU=0 TC_OPT=0'
   # the USB+AMD GPU takes an exclusive flock; serialize all targets that touch it
   usbgpu_lock = File("models/.usb_gpu.lock").abspath
 

@@ -571,9 +571,9 @@ first.
 ## Environment notes
 
 - `config_beampilot.sh`: `BEAMPILOT_BACKEND=nv` (`nv` | `amd` | `cuda` | `cl`; `USE_NV`/`USE_AMD` are
-  the upstream spelling and only consulted when unset), `CHESTNUT=0` (setting 1 forces `DEV=AMD`
-  regardless of backend — built for comma's USB eGPU, not this machine), `BIG=1` (a *resolution*
-  switch, not a UI scale knob — use `SCALE` for that).
+  the upstream spelling and only consulted when unset), `CHESTNUT=0` (on desktop, setting 1 builds
+  the big model for the selected backend/device; comma ARM keeps its QCOM-warp/AMD-eGPU split),
+  `BIG=1` (a *resolution* switch, not a UI scale knob — use `SCALE` for that).
 - `SKIP_FW_QUERY=1` + `FINGERPRINT=HONDA_CIVIC_2022` — the car identity is set here, not
   fingerprinted from CAN. Changing it requires matching `beamngd`/`beamcamd` updates.
 - **This machine has two NVIDIA cards**: a GTX 1660 SUPER (Turing, 7.5) at index 0 and the RTX 3060

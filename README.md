@@ -361,10 +361,9 @@ core dependence is stark: `cl` is 4.4× slower than `cuda` on the 3060, where on
 it was 2×.
 
 Those are the raw ONNX graph through `OnnxRunner`, not a `BEAM`-searched build, so a tuned
-compile should do better — but not 6× better on the 1660. Note also that `CHESTNUT=1` forces
-`DEV=AMD` in `modeld/SConscript`'s `usbgpu_tg_flags` regardless of the backend above: the model
-is built for comma's Chestnut USB eGPU accessory, and `usbgpu_present()` is just
-`CHESTNUT == "1"` with no actual detection.
+compile should do better — but not 6× better on the 1660. On desktop, `CHESTNUT=1` compiles and
+runs this model on the selected backend and GPU above. The upstream comma ARM path remains split:
+warping on QCOM and inference on the real external AMD Chestnut accessory.
 
 ### Driving limits
 
