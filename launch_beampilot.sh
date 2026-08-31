@@ -3,6 +3,25 @@
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null && pwd )"
 source "$DIR/config_beampilot.sh"
 
+# One beampilot manager per user. msgq allows a later publisher to evict an
+# earlier one, so accidentally launching this script in a second terminal does
+# not fail cleanly on its own -- it leaves the two stacks fighting over named
+# services. Keep this fd open across the final exec so the lock lives exactly
+# as long as manager does.
+exec 9>"/tmp/beampilot-${UID}.lock"
+if ! flock -n 9; then
+  echo "beampilot is already running for user ${USER:-$UID}; stop the existing stack before launching another" >&2
+  exit 1
+fi
+
+# msgq applies OPENPILOT_PREFIX as a subdirectory but does not create that
+# subdirectory itself (the test-only OpenpilotPrefix helper normally does).
+# Every publisher would otherwise fail its first connect.
+mkdir -p "/dev/shm/msgq_${OPENPILOT_PREFIX}" || {
+  echo "could not create beampilot's isolated msgq directory" >&2
+  exit 1
+}
+
 # FINGERPRINT is BEAMPILOT by default, which lives in this repo rather than in
 # the opendbc submodule (see tools/install_beampilot_car.py). A `git submodule
 # update` silently reverts the two lines that register it, and the symptom is

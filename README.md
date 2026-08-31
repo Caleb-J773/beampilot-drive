@@ -227,6 +227,11 @@ source .venv/bin/activate.fish   # bash/zsh: source .venv/bin/activate
 Startup takes a while, which is plenty of time to tab back into the game. Once it's up, get above
 ~20 mph and press `i`. (Set `BEAMPILOT_LAUNCH_DELAY=5` if you'd rather have a countdown first.)
 
+beampilot uses its own openpilot IPC namespace, so another checkout such as steerpilot cannot
+feed its car state, model output, or plans into this stack. Launch also holds a per-user lock: a
+second `./launch_beampilot.sh` exits with an "already running" message instead of leaving two
+managers fighting over the same channels.
+
 <div align="center">
 
 | Key | Action |

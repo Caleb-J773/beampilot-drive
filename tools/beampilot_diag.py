@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """Full beampilot data-flow diagnostic: proves which daemons are/aren't publishing,
 with measured rates and actual field values."""
+import os
 import socket
 import struct
 import time
+
+# Must be set before importing messaging: it selects the msgq namespace.
+os.environ["OPENPILOT_PREFIX"] = "beampilot"
 
 import openpilot.cereal.messaging as messaging
 from openpilot.cereal.services import SERVICE_LIST

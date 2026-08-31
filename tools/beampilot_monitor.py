@@ -13,10 +13,14 @@ Usage:
   uv run python tools/beampilot_monitor.py --once   # one snapshot, for pasting
 """
 import argparse
+import os
 import re
 import shutil
 import sys
 import time
+
+# Must be set before importing messaging: it selects the msgq namespace.
+os.environ["OPENPILOT_PREFIX"] = "beampilot"
 
 import openpilot.cereal.messaging as messaging
 from openpilot.cereal.services import SERVICE_LIST

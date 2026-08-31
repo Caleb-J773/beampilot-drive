@@ -267,6 +267,12 @@ first.
   `system/camerad/webcam/camerad.py` has this same bug, unfixed — it's just never exercised there.)
 - **`launch_beampilot.sh` needs its shebang.** Without it, fish's ENOEXEC fallback runs it under
   `dash`, `source` fails silently, and the whole config is quietly lost.
+- **Every openpilot checkout otherwise shares the same msgq service names.** Running steerpilot,
+  a second beampilot checkout, or a second launch at the same time mixes `carState`, `modelV2`,
+  plans and controls across stacks; the observed result was lane ping-pong plus acceleration
+  against the displayed set speed. `OPENPILOT_PREFIX=beampilot` isolates msgq, VisionIPC, Params
+  and logs, and `launch_beampilot.sh` holds `/tmp/beampilot-$UID.lock` to reject a duplicate
+  beampilot launch. Standalone channel tools must select that prefix before importing messaging.
 
 ### Car model / CAN
 

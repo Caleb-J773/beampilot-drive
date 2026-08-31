@@ -7,6 +7,14 @@
 # offroad alerts (selfdrived.py), and process-lag/sensor-timing leniency.
 export SIMULATION="1"
 
+# Keep this stack's msgq, VisionIPC, Params and logs separate from any other
+# openpilot fork running under the same user. Without a prefix, two managers
+# publish services with identical names; subscribers then combine one stack's
+# carState/modelV2/plan with the other's controls. That is unsafe: it has
+# produced lane ping-pong and acceleration against the visible set speed.
+# Standalone beampilot tools select the same fixed namespace.
+export OPENPILOT_PREFIX="beampilot"
+
 # The car openpilot thinks it is. BEAMPILOT is our own opendbc platform
 # (opendbc_repo/opendbc/car/beampilot/) -- same Honda Bosch radarless CAN, since
 # that is what beamngd hand-packs, but without a Civic's steering rack, weight
