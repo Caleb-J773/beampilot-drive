@@ -14,6 +14,19 @@
 
 ---
 
+> [!IMPORTANT]
+> **Development moved to [steerpilot](https://github.com/Caleb-J773/steerpilot).**
+>
+> steerpilot is this repository, renamed and generalised to more than one game. BeamNG.drive is
+> not dropped — it is still the default, and everything described below still applies there; the
+> BeamNG mod, `beamngd` and `beamcamd` all moved across unchanged. What is new is a game adapter
+> contract, so ETS2/ATS can share the same driving stack.
+>
+> Every commit here has been carried over. This repository is kept for history and is no longer
+> updated; open issues and push work against steerpilot instead.
+
+---
+
 A fork of [openpilot](https://github.com/commaai/openpilot) that swaps the camera and CAN bus for
 a screen capture of BeamNG.drive and a small Lua mod. The driving stack is untouched — the same
 `modeld`, `controlsd`, `plannerd` and `locationd` that run on comma hardware run here, and they
