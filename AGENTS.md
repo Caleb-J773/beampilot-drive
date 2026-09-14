@@ -96,7 +96,9 @@ Targeted tests worth knowing by name — run these after touching the matching c
 
 Lua tests need `luajit`, not the in-game interpreter (see gotchas re: `table.clear`):
 ```bash
-luajit tools/beamng_mod/test_beampilot_bsm.lua   # BSM zone geometry vs BeamNG's real mathlib
+luajit tools/beamng_mod/test_beampilot_bsm.lua            # BSM zone geometry vs BeamNG's real mathlib
+luajit tools/beamng_mod/test_beampilot_camera_tuner.lua   # per-JBeam camera pose profiles
+luajit tools/beamng_mod/test_beampilot_recovery.lua       # control-port takeover + camera retry
 ```
 
 Anything that consumes `modelV2` or another capnp message **must** be tested against a real
@@ -368,6 +370,38 @@ first.
   full delay instead of strobing.
 - **Use `obj:getDirectionVectorRight()` for handedness**, don't derive it from a cross product.
   Getting it backwards swaps left and right BSM, which looks plausible right up until it matters.
+
+### Vehicle switching, the control port, and the camera
+
+Three GE/vehicle-VM calls that return nothing, and the latching bugs that grew on top of them.
+
+- **Nothing releases the control port when you leave a vehicle.** `protocols.lua` gates
+  `fillStruct` on `playerInfo.firstPlayerSeated`, and its own `onPlayersChanged` returns early
+  when unseated and never forwards to protocol modules — so the vehicle you *were* driving keeps
+  UDP 49153 bound for the rest of the session. Switch or respawn into another car and its
+  `ensureControlSocket()` fails to bind on every tick (a socket created, failed and closed at
+  100Hz, with an `log("E")` each time) while beamngd's control packets keep being delivered to the
+  car nobody is driving. It presents as "openpilot just will not drive this car". The seated
+  vehicle now reclaims the port: `beampilot.lua` publishes itself as the vehicle-Lua global
+  `beampilotBridge`, and on a failed bind asks GE to call `releaseControlPort()` on every OTHER
+  vehicle. Rate-limited to 1Hz, and it warns once rather than once per attempt.
+- **`core_camera.setByName` RETURNS NOTHING.** `camera.lua`'s `setByName` calls `set()` and
+  discards the result; the failing path underneath (`_setVehicleCameraByName`) only
+  `log("E")`s "Unable to switch to requested camera" and returns false into that discard. So
+  `setByName` cannot tell you whether it worked, and any `result == false` check against it is
+  dead code. The mod used to fire it once at spawn and set `cameraSelected = true` regardless —
+  lose the startup race and the openpilot camera never came up, with nothing retrying. It now
+  round-trips through GE (`getActiveCamName`) and only latches on a confirmed `"openpilot"`,
+  retrying at 1Hz otherwise.
+- **`extensions.load` RETURNS NOTHING either.** It is `loadExt` in `lua/common/extensions.lua`:
+  `loadInternal(true, ...)` then `processLoadedFreshList()`, no return. The module it loads is
+  published as a GLOBAL. `cameraTuner = extensions.load("beampilotCameraTuner")` therefore stored
+  nil and the camera fell through to the untuned base config — the in-game tuner's sliders moving
+  nothing. Load for the side effect, then `rawget(_G, name)`.
+- **Anything GE calls back into vehicle Lua has to be reachable by NAME.** `queueLuaCommand` runs a
+  string in the target vehicle's VM, so the entry point must be a global there —
+  hence `rawset(_G, "beampilotBridge", M)`. Use `rawset`, not a bare assignment, so the
+  `luajit -bl | grep GSET` convention above still holds.
 
 ### Radar
 

@@ -41,7 +41,22 @@ export SKIP_FW_QUERY="1"
 # LATERAL (turning). The binding one is lateral accel: max curvature is
 # MAX_LAT_ACCEL / v^2, so stock 3.0 allows only a ~300m radius at 67mph.
 #   3.0 = stock/comfort   5.0 = spirited   8.0+ = approaching real tire grip
-export BEAMPILOT_MAX_LAT_ACCEL="65.0"    # m/s^2
+#
+# These are PERMISSIONS, not commands, and the permission must stay inside what
+# the tyres can actually deliver. A road car tops out near 9-11 m/s^2 (about
+# 1.0g). Set far above that -- this was 65.0, i.e. 6.6g -- and the planner will
+# happily plan a curvature no vehicle in the game can achieve: the model asks
+# for the turn, the car understeers wide, the error grows, and it leaves the
+# road on the corner it was trying to take. "It wants to turn harder than it
+# can" is the signature of a lateral limit set above the grip limit, NOT of a
+# limit set too low. If it still runs wide here, drop to 8.0 before raising it.
+#
+# ACCEL and JERK are not two dials for the same thing. ACCEL caps how TIGHT a
+# turn may be (max curvature = accel / v^2); JERK caps how FAST it winds that
+# turn on (max curvature rate = jerk / v^2). If the car feels slow to take up a
+# bend at the entry, that is JERK, not ACCEL -- halving it doubles the time to
+# reach any given curvature. Leave it high unless the car is weaving.
+export BEAMPILOT_MAX_LAT_ACCEL="10.0"    # m/s^2
 export BEAMPILOT_MAX_LAT_JERK="20.0"    # m/s^3, how fast it may change curvature
 # export BEAMPILOT_MAX_CURVATURE="0.2"  # 1/m, geometric cap; only binds below ~11mph
 #

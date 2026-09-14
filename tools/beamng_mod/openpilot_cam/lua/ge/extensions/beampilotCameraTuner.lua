@@ -347,8 +347,23 @@ function M.activateCamera()
   if not core_camera or type(core_camera.setByName) ~= "function" then
     return state(nil, "BeamNG camera service is not available")
   end
-  local ok, result = pcall(core_camera.setByName, 0, "openpilot", false)
-  if not ok or result == false then return state(nil, "Could not activate the openpilot camera") end
+  -- core_camera.setByName RETURNS NOTHING -- lua/ge/extensions/core/camera.lua's
+  -- setByName calls set() and discards its result, and the failing path below
+  -- it only log("E")s "Unable to switch to requested camera". So the old
+  -- `result == false` check could never fire against a nil return, and this
+  -- reported success every time, including when the openpilot camera was not
+  -- registered at all. Ask what the active camera actually is instead.
+  local ok, err = pcall(core_camera.setByName, 0, "openpilot", false)
+  if not ok then
+    return state(nil, "Could not activate the openpilot camera: " .. tostring(err))
+  end
+  if type(core_camera.getActiveCamName) == "function" then
+    local nameOk, active = pcall(core_camera.getActiveCamName, 0)
+    if nameOk and active ~= nil and active ~= "openpilot" then
+      return state(nil, "BeamNG refused the openpilot camera (still on '" .. tostring(active)
+        .. "') -- is the openpilot_cam mod installed?")
+    end
+  end
   return state("Openpilot camera activated")
 end
 

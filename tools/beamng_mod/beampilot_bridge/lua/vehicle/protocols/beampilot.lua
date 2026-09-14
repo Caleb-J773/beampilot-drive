@@ -32,6 +32,16 @@ local cameraSelected = false
 -- out of engagement, never on every not-engaged tick. Otherwise it fights
 -- (and wins against) the player's own WASD/controller input forever.
 local isControlling = false
+-- Camera selection is verified, not assumed: core_camera.setByName returns
+-- NOTHING and only log("E")s when it fails, so the request has to be checked
+-- and retried. See requestCamera/onCameraResult below.
+local cameraRequestedAt = nil
+local cameraMissWarned = false
+local CAMERA_RETRY_SECONDS = 1.0
+-- Rate limits for the control-port takeover; see ensureControlSocket.
+local portTakeoverAt = nil
+local portWarned = false
+local PORT_RETRY_SECONDS = 1.0
 
 local DL_BSM_LEFT           = 16
 local DL_BSM_RIGHT          = 32
@@ -1060,6 +1070,8 @@ local function reset()
   lastControlAt = nil
   isControlling = false
   cameraSelected = false
+  cameraRequestedAt = nil
+  cameraMissWarned = false
   lastCameraConfig = nil
   bsmLeft, bsmRight = false, false
   bsmLeftApproach, bsmRightApproach = false, false
@@ -1129,17 +1141,92 @@ local function releaseControl()
   lastControlAt = nil
 end
 
+-- Hand the control port back. Called on the vehicle we are NO LONGER driving,
+-- from the one that is -- see ensureControlSocket for why that is necessary.
+local function releaseControlPort()
+  releaseControl()
+  if controlSocket then
+    controlSocket:close()
+    controlSocket = nil
+    log("I", "", "beampilot: released the control port to another vehicle")
+  end
+end
+
 local function ensureControlSocket()
   if controlSocket then return end
   local sock = socket.udp()
   sock:settimeout(0)
   local ok, err = sock:setsockname(CONTROL_ADDRESS, CONTROL_PORT)
-  if not ok then
-    log("E", "", "beampilot: failed to bind control socket on "..CONTROL_ADDRESS..":"..CONTROL_PORT..": "..dumps(err))
-    sock:close()
+  if ok then
+    controlSocket = sock
+    portWarned = false
     return
   end
-  controlSocket = sock
+  sock:close()
+
+  -- The port is almost certainly held by a vehicle we used to be seated in.
+  -- Nothing releases it on its own: protocols.lua gates fillStruct on
+  -- playerInfo.firstPlayerSeated, and its onPlayersChanged returns early when
+  -- unseated and never forwards to protocol modules -- so the vehicle that
+  -- stopped being the player's keeps this socket bound for the rest of the
+  -- session. Control packets then keep being delivered to the car nobody is
+  -- driving while this one retries the bind at 100Hz forever, so switching or
+  -- respawning into another vehicle left openpilot unable to drive it at all.
+  --
+  -- Ask the others to let go. Vehicle Lua cannot reach another vehicle's VM
+  -- directly, so this goes out through GE, which can.
+  local now = os.clock()
+  if not portTakeoverAt or (now - portTakeoverAt) >= PORT_RETRY_SECONDS then
+    portTakeoverAt = now
+    if not portWarned then
+      log("W", "", "beampilot: control port "..CONTROL_ADDRESS..":"..CONTROL_PORT
+        .." is held by another vehicle ("..dumps(err).."); reclaiming it")
+      portWarned = true
+    end
+    obj:queueGameEngineLua(string.format(
+      "for _, v in ipairs(getAllVehicles() or {}) do if v:getId() ~= %d then "
+        .. "v:queueLuaCommand('if beampilotBridge then beampilotBridge.releaseControlPort() end') "
+        .. "end end", obj:getId()))
+  end
+end
+
+-- Auto-select the openpilot_cam mod's rigidly-mounted, FOV-matched camera so no
+-- manual camera switch is needed. Vehicle Lua cannot touch GE-side state
+-- directly; queueGameEngineLua is the normal cross-VM bridge for this (see
+-- lua/vehicle/bullettime.lua for the same pattern).
+--
+-- The result has to come BACK, because core_camera.setByName returns nothing:
+-- camera.lua's setByName calls set() and discards it, and the failing path
+-- underneath only log("E")s "Unable to switch to requested camera". Firing this
+-- once and latching success regardless is why the openpilot camera sometimes
+-- simply never came up -- lose the race against the mod's cameras being
+-- registered for this vehicle and nothing ever tried again.
+local function requestCamera()
+  obj:queueGameEngineLua(string.format(
+    "local v = getObjectByID(%d) "
+      .. "if v then "
+      .. "if core_camera and core_camera.setByName then core_camera.setByName(0, 'openpilot', false) end "
+      .. "local a = core_camera and core_camera.getActiveCamName and core_camera.getActiveCamName(0) "
+      .. "v:queueLuaCommand('if beampilotBridge then beampilotBridge.onCameraResult(\"'"
+      .. " .. tostring(a) .. '\") end') "
+      .. "end", obj:getId()))
+end
+
+local function onCameraResult(activeName)
+  if activeName == "openpilot" then
+    if not cameraSelected then log("I", "", "beampilot: openpilot camera active") end
+    cameraSelected = true
+    cameraMissWarned = false
+    return
+  end
+  -- Keep retrying: the mod's camera can register late, and this costs one
+  -- queued command a second until it takes.
+  cameraSelected = false
+  if not cameraMissWarned then
+    log("W", "", "beampilot: BeamNG is on camera '"..tostring(activeName)
+      .."', not 'openpilot' -- retrying (is the openpilot_cam mod installed?)")
+    cameraMissWarned = true
+  end
 end
 
 local function pollControl()
@@ -1205,13 +1292,11 @@ local function fillStruct(o, dtSim)
   end
 
   if not cameraSelected then
-    -- Auto-select the openpilot_cam mod's rigidly-mounted, FOV-matched camera
-    -- (mods/unpacked/openpilot_cam) so no manual camera switch is needed.
-    -- Vehicle Lua can't touch GE-side state directly; queueGameEngineLua is
-    -- the normal cross-VM bridge for this (see lua/vehicle/bullettime.lua and
-    -- others for the same pattern).
-    obj:queueGameEngineLua("core_camera.setByName(0, 'openpilot', false)")
-    cameraSelected = true
+    local now = os.clock()
+    if not cameraRequestedAt or (now - cameraRequestedAt) >= CAMERA_RETRY_SECONDS then
+      cameraRequestedAt = now
+      requestCamera()
+    end
   end
 
   o.format = "BPL1"
@@ -1266,5 +1351,13 @@ M.getMaxUpdateRate = getMaxUpdateRate
 M.getStructDefinition = getStructDefinition
 M.fillStruct = fillStruct
 M.isPhysicsStepUsed = isPhysicsStepUsed
+M.releaseControlPort = releaseControlPort
+M.onCameraResult = onCameraResult
+
+-- Published so GE can call back into THIS vehicle's VM by name. Both callers
+-- above route through here: the camera result, and another vehicle asking us to
+-- give up the control port. rawset rather than a bare assignment so the
+-- `luajit -bl | grep GSET` convention still holds.
+rawset(_G, "beampilotBridge", M)
 
 return M

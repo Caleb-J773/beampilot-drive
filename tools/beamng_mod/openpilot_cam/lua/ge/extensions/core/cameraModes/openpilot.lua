@@ -15,12 +15,27 @@ local cameraTuner = nil
 local function effectiveConfig(veh, baseCfg)
   -- Load through BeamNG's extension manager so this camera and the Vue/Lua
   -- bridge share one module instance (and therefore one live working profile).
-  cameraTuner = cameraTuner or rawget(_G, "beampilotCameraTuner")
-  if not cameraTuner and extensions and type(extensions.load) == "function" then
-    cameraTuner = extensions.load("beampilotCameraTuner")
+  --
+  -- extensions.load() RETURNS NOTHING. In lua/common/extensions.lua it is
+  -- loadExt, which calls loadInternal and discards the result; the module it
+  -- loads is published as a global instead. Assigning its return value stored
+  -- nil, so on the frame the tuner was first needed this fell through to the
+  -- untuned base config, and if the global lookup ever missed it did so every
+  -- frame -- the camera silently ignoring every slider in the tuner UI. Load
+  -- for the side effect, then read the global.
+  if not cameraTuner then
+    cameraTuner = rawget(_G, "beampilotCameraTuner")
+    if not cameraTuner and extensions and type(extensions.load) == "function" then
+      -- pcall because this runs inside the camera update: an error thrown here
+      -- takes out the camera itself, which is a far worse failure than an
+      -- untuned pose.
+      pcall(extensions.load, "beampilotCameraTuner")
+      cameraTuner = rawget(_G, "beampilotCameraTuner")
+    end
   end
   if cameraTuner and type(cameraTuner.getEffectiveConfig) == "function" then
-    return cameraTuner.getEffectiveConfig(veh, baseCfg)
+    local ok, cfg = pcall(cameraTuner.getEffectiveConfig, veh, baseCfg)
+    if ok and type(cfg) == "table" then return cfg end
   end
   return baseCfg
 end

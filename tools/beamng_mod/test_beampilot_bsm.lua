@@ -159,6 +159,9 @@ obj = {
   getInitialWidth = function() return EGO_WIDTH end,
   getRollPitchYaw = function() return 0, 0, 0 end,
   getRollPitchYawAngularVelocity = function() return 0, 0, 0 end,
+  -- The real obj has this; requestCamera and the control-port takeover both
+  -- need our own id to exclude us from a broadcast to every other vehicle.
+  getId = function() return objectId end,
   queueGameEngineLua = function() end,
   getObjectCenterPosition = function(_, id)
     local v = world.vehicles[id]
